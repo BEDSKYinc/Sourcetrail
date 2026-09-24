@@ -8,9 +8,11 @@ Speaks MCP over stdio: newline-delimited JSON-RPC 2.0. Stdlib only.
 
 import json
 import os
+import shutil
 import subprocess
 import sqlite3
 import sys
+import tempfile
 
 PROTOCOL = "2025-06-18"
 
@@ -56,11 +58,35 @@ class Index:
         self.db_path, self.crate_root, self.indexer = db_path, crate_root, indexer
         self.py_root, self.py_indexer = py_root, py_indexer
         self.ts_root, self.ts_indexer = ts_root, ts_indexer
+        self._snapshot = None
+        self._snapshot_key = None
+
+    def snapshot(self):
+        """A copy of the .srctrldb ALONE, never its -wal/-shm.
+
+        Sourcetrail keeps the index open with a write-ahead log. Reading that live file hands
+        back rows from `edge` pages through the `node` schema: `serialized_name` arrives as an
+        integer, the node count triples, and nothing raises. `mode=ro` does not save you, it is
+        what causes it. The copy is refreshed whenever the index itself changes.
+        """
+        stamp = os.stat(self.db_path)
+        key = (stamp.st_mtime_ns, stamp.st_size)
+        if key != self._snapshot_key:
+            handle, path = tempfile.mkstemp(prefix="sourcetrail-index-", suffix=".srctrldb")
+            os.close(handle)
+            shutil.copyfile(self.db_path, path)
+            if self._snapshot:
+                try:
+                    os.remove(self._snapshot)
+                except OSError:
+                    pass
+            self._snapshot, self._snapshot_key = path, key
+        return self._snapshot
 
     def conn(self):
         if not os.path.exists(self.db_path):
             raise RuntimeError(f"no index at {self.db_path} - run the reindex tool first")
-        c = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+        c = sqlite3.connect(f"file:{self.snapshot()}?mode=ro", uri=True)
         c.row_factory = sqlite3.Row
         return c
 
