@@ -61,8 +61,26 @@ QString groupOfPath(const QString& rel)
 std::map<QString, int> layerGroups(
 	const QStringList& groups, const std::map<std::pair<QString, QString>, size_t>& deps)
 {
-	std::map<QString, std::set<QString>> out, in;
+	// Only a group's strong dependencies decide where it sits. One below a fraction of the
+	// group's strongest one may not push anything down a layer: grouping by feature connects
+	// almost every pair, and taking all of them turns the map into a fourteen step staircase.
+	// The weak edges are still drawn, they just do not move anybody.
+	std::map<QString, size_t> strongest;
 	for (const auto& dep: deps)
+	{
+		strongest[dep.first.first] = std::max(strongest[dep.first.first], dep.second);
+	}
+	std::map<std::pair<QString, QString>, size_t> strong;
+	for (const auto& dep: deps)
+	{
+		if (dep.second * 100 >= strongest[dep.first.first] * 15)
+		{
+			strong.insert(dep);
+		}
+	}
+
+	std::map<QString, std::set<QString>> out, in;
+	for (const auto& dep: strong)
 	{
 		out[dep.first.first].insert(dep.first.second);
 		in[dep.first.second].insert(dep.first.first);
@@ -98,7 +116,7 @@ std::map<QString, int> layerGroups(
 				size_t count = 0;
 				for (const QString& source: in[name])
 				{
-					auto it = deps.find({source, name});
+					auto it = strong.find({source, name});
 					if (rest.count(source) && it != deps.end())
 					{
 						count += it->second;
@@ -508,9 +526,11 @@ void QtCodeMap::rebuild()
 
 	// dependency curves behind the groups
 	size_t maxCount = 1;
+	std::map<QString, size_t> strongestOut;
 	for (const auto& dep: deps)
 	{
 		maxCount = std::max(maxCount, dep.second);
+		strongestOut[dep.first.first] = std::max(strongestOut[dep.first.first], dep.second);
 	}
 	for (const auto& dep: deps)
 	{
@@ -524,8 +544,11 @@ void QtCodeMap::rebuild()
 		path.cubicTo(from + QPointF(0, bend), to - QPointF(0, bend), to);
 
 		QGraphicsPathItem* curve = m_scene->addPath(path);
+		// A group's main dependency is drawn solid, its trickle stays a whisper. Everything is
+		// still there, it just does not add up to a hairball.
+		const qreal share = static_cast<qreal>(dep.second) / strongestOut[dep.first.first];
 		QColor edgeColor = color(GraphViewStyle::getEdgeColor("call"));
-		edgeColor.setAlpha(120);
+		edgeColor.setAlpha(static_cast<int>(25 + 165 * share));
 		curve->setPen(QPen(
 			edgeColor, 1.0 + 3.0 * std::log(1.0 + dep.second) / std::log(1.0 + maxCount),
 			Qt::SolidLine, Qt::RoundCap));
