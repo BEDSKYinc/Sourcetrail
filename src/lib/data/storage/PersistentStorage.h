@@ -107,6 +107,8 @@ public:
 
 	NodeType getNodeTypeForNodeWithId(Id nodeId) const override;
 
+	CodeMapData getCodeMap() const override;
+
 	StorageEdge getEdgeById(Id edgeId) const override;
 
 	std::shared_ptr<SourceLocationCollection> getFullTextSearchLocations(

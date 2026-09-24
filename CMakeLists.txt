@@ -108,9 +108,10 @@ set(CMAKE_INCLUDE_CURRENT_DIR ON)
 if (isGccCompiler OR isClangCompiler)
 	# https://gcc.gnu.org/onlinedocs/gcc/Optimize-Options.html
 	# CMakeCache.txt entry: "-O3 -DNDEBUG"
-	add_compile_options("$<$<CONFIG:Release>:-O3;-fno-fast-math;-flto=auto>")
-	add_link_options("$<$<CONFIG:Release>:-flto=auto>")
-	
+	# No -flto=auto: with GCC 16 it miscompiles lib_gui and the app segfaults in
+	# QtActions::Info before the main window is up. Link time drops, runtime is unchanged.
+	add_compile_options("$<$<CONFIG:Release>:-O3;-fno-fast-math>")
+
 	# Release-Build with Clang v21 on (K)Ubuntu v25.10 fails:
 	# 1) `-flto=auto` fails with: "error loading plugin: /usr/lib/llvm-21/bin/../lib/LLVMgold.so: cannot open shared object file"
 	# 2) `-fuse-ld=lld` fails with: "ld.lld: error: relocation refers to a discarded section: .text._ZN7testing4Test5SetupEv"

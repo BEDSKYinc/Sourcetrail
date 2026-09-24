@@ -264,6 +264,8 @@ add_library(Sourcetrail_lib_gui
 	qt/window/QtBookmarkBrowser.h
 	qt/window/QtBookmarkCreator.cpp
 	qt/window/QtBookmarkCreator.h
+	qt/window/QtCodeMap.cpp
+	qt/window/QtCodeMap.h
 	qt/window/QtIndexingDialog.cpp
 	qt/window/QtIndexingDialog.h
 	qt/window/QtIndexingProgressDialog.cpp

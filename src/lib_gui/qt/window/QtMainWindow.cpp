@@ -31,6 +31,7 @@
 #include "MessageWindowClosed.h"
 #include "MessageZoom.h"
 #include "QtAbout.h"
+#include "QtCodeMap.h"
 #include "QtActions.h"
 #include "QtContextMenu.h"
 #include "QtFileDialog.h"
@@ -142,6 +143,7 @@ QtMainWindow::QtMainWindow()
 	setupHistoryMenu();
 	setupBookmarksMenu();
 	setupHelpMenu();
+	setupCodeMap();
 
 	// Need to call loadLayout here for right DockWidget size on Linux
 	// Second call is in Application.cpp
@@ -308,6 +310,15 @@ void QtMainWindow::loadLayout()
 	setShowDockWidgetTitleBars(settings.value(QStringLiteral("showTitleBars"), true).toBool());
 	settings.endGroup();
 	loadDockWidgetLayout();
+}
+
+void QtMainWindow::setupCodeMap()
+{
+	QDockWidget* dock = new QDockWidget(QStringLiteral("Landkarte"), this);
+	dock->setObjectName(QStringLiteral("DockCodeMap"));
+	dock->setWidget(new QtCodeMap(dock));
+	addDockWidget(Qt::TopDockWidgetArea, dock);
+	m_viewMenu->insertAction(m_viewSeparator, dock->toggleViewAction());
 }
 
 void QtMainWindow::loadDockWidgetLayout()

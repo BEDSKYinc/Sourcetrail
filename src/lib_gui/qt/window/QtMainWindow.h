@@ -176,6 +176,7 @@ private:
 	void setupEditMenu();
 	void setupProjectMenu();
 	void setupViewMenu();
+	void setupCodeMap();
 	void setupHistoryMenu();
 	void setupBookmarksMenu();
 	void setupHelpMenu();

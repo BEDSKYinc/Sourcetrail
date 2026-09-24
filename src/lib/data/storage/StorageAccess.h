@@ -8,6 +8,7 @@
 #include "types.h"
 
 #include "BookmarkCategory.h"
+#include "CodeMapData.h"
 #include "EdgeBookmark.h"
 #include "ErrorCountInfo.h"
 #include "ErrorFilter.h"
@@ -47,6 +48,8 @@ public:
 		const std::vector<Id>& nodeIds) const = 0;
 
 	virtual NodeType getNodeTypeForNodeWithId(Id id) const = 0;
+
+	virtual CodeMapData getCodeMap() const = 0;
 
 	virtual StorageEdge getEdgeById(Id edgeId) const = 0;
 

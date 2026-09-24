@@ -175,6 +175,11 @@ bool Application::hasGUI() const
 	return m_hasGUI;
 }
 
+StorageAccess* Application::getStorageAccess() const
+{
+	return m_storageCache.get();
+}
+
 int Application::handleDialog(const std::string& message)
 {
 	return getDialogView(DialogView::UseCase::GENERAL)->confirm(message);

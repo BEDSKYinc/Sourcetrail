@@ -285,6 +285,7 @@ add_library(Sourcetrail_lib
 	data/storage/StorageCache.h
 	data/storage/StorageProvider.cpp
 	data/storage/StorageProvider.h
+	data/storage/CodeMapData.h
 	data/storage/StorageStats.h
 
 	data/tooltip/TooltipInfo.h

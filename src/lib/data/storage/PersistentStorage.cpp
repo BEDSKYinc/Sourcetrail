@@ -581,6 +581,63 @@ NodeType PersistentStorage::getNodeTypeForNodeWithId(Id nodeId) const
 	return NodeType(m_sqliteIndexStorage.getFirstById<StorageNode>(nodeId).type);
 }
 
+CodeMapData PersistentStorage::getCodeMap() const
+{
+	TRACE();
+
+	CodeMapData data;
+	std::vector<Id> symbolIds;
+	std::map<Id, Id> nodeToFile;
+
+	m_sqliteIndexStorage.forEach<StorageNode>([&](StorageNode&& storageNode) {
+		if (NodeType(storageNode.type).isFile())
+		{
+			auto it = m_fileNodeIndexed.find(storageNode.id);
+			if (it != m_fileNodeIndexed.end() && it->second)
+			{
+				data.files.push_back(
+					{storageNode.id,
+					 FilePath(NameHierarchy::deserialize(storageNode.serializedName).getQualifiedName()),
+					 0});
+				nodeToFile.emplace(storageNode.id, storageNode.id);	   // a file belongs to itself
+			}
+		}
+		else
+		{
+			symbolIds.push_back(storageNode.id);
+		}
+	});
+
+	std::map<Id, size_t> symbolCounts;
+	for (const auto& p: getNodeIdToParentFileMap(symbolIds))
+	{
+		nodeToFile.emplace(p.first, p.second.first);
+		symbolCounts[p.second.first]++;
+	}
+
+	m_sqliteIndexStorage.forEach<StorageEdge>([&](StorageEdge&& storageEdge) {
+		// MEMBER is containment, not usage. Counting it would connect every file to every other one.
+		if (storageEdge.type == Edge::EDGE_MEMBER)
+		{
+			return;
+		}
+
+		auto source = nodeToFile.find(storageEdge.sourceNodeId);
+		auto target = nodeToFile.find(storageEdge.targetNodeId);
+		if (source != nodeToFile.end() && target != nodeToFile.end() && source->second != target->second)
+		{
+			data.dependencies[{source->second, target->second}]++;
+		}
+	});
+
+	for (CodeMapData::File& file: data.files)
+	{
+		file.symbolCount = symbolCounts[file.nodeId];
+	}
+
+	return data;
+}
+
 StorageEdge PersistentStorage::getEdgeById(Id edgeId) const
 {
 	return m_sqliteIndexStorage.getEdgeById(edgeId);

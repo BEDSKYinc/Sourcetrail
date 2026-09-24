@@ -161,6 +161,7 @@ DEF_GETTER_1(getNameHierarchiesForNodeIds, const std::vector<Id>&, std::vector<N
 
 typedef std::map<Id, std::pair<Id, NameHierarchy>> NodeIdToParentFileMap;
 DEF_GETTER_1(getNodeIdToParentFileMap, const std::vector<Id>&, NodeIdToParentFileMap, {})
+DEF_GETTER_0(getCodeMap, CodeMapData, {})
 
 DEF_GETTER_1(getNodeTypeForNodeWithId, Id, NodeType, NodeType(NODE_SYMBOL))
 DEF_GETTER_1(getEdgeById, Id, StorageEdge, StorageEdge())

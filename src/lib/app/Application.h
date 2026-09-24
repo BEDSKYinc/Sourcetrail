@@ -18,6 +18,7 @@ class Bookmark;
 class IDECommunicationController;
 class MainView;
 class NetworkFactory;
+class StorageAccess;
 class StorageCache;
 class UpdateChecker;
 class ViewFactory;
@@ -48,6 +49,8 @@ public:
 	bool isProjectLoaded() const;
 
 	bool hasGUI() const;
+
+	StorageAccess* getStorageAccess() const;
 
 	int handleDialog(const std::string& message);
 	int handleDialog(const std::string& message, const std::vector<std::string>& options);
