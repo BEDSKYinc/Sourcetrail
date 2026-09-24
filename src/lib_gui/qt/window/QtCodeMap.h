@@ -3,7 +3,9 @@
 
 #include <map>
 
+#include <QDateTime>
 #include <QJsonObject>
+#include <QPen>
 #include <QSet>
 #include <QString>
 #include <QWidget>
@@ -16,6 +18,7 @@
 #include "QtThreadedFunctor.h"
 
 class QComboBox;
+class QGraphicsRectItem;
 class QGraphicsScene;
 class QLabel;
 class QLineEdit;
@@ -27,7 +30,7 @@ class QTimer;
 class QGraphicsView;
 
 // Map of the whole index: directories or features as groups, files as nodes inside them.
-// Every node carries a plain language note, and the question box asks Claude about the selection.
+// Every node carries a plain language note, and the chat box asks Claude about the selection.
 class QtCodeMap
 	: public QWidget
 	, public MessageListener<MessageActivateTokens>
@@ -44,6 +47,7 @@ public:
 	// called by the scene items
 	void toggleGroup(const QString& group);
 	void activateFile(Id fileNodeId);
+	void nodeMoved(const QString& layoutKey, const QPointF& pos);
 
 private Q_SLOTS:
 	void rebuild();
@@ -58,11 +62,27 @@ private:
 	void handleMessage(MessageActivateTokens* message) override;
 	void handleMessage(MessageIndexingFinished* message) override;
 
-	void select(const QString& key, const QString& title, const FilePath& path);
+	void select(const QString& key, const QString& title, const FilePath& path, Id fileNodeId);
 	void showNote();
 	QString groupOf(size_t fileIndex) const;
 	QString relative(const FilePath& path) const;
 	QString noteField(const QString& key, const QString& field) const;
+
+	// notes on disk can change under an open map, so they are re-read before every write
+	void reloadNotesIfChanged();
+
+	// hand placed nodes, per grouping mode, next to the notes
+	QString layoutMode() const;
+	QJsonObject layoutOfMode() const;
+	void saveLayout();
+
+	// the node Sourcetrail is looking at, expanded and centred
+	void highlight(Id fileNodeId);
+	void zoomBy(double factor);
+	void zoomFit();
+
+	QString mcpConfig() const;
+	void appendChat(const QString& who, const QString& text, const QString& color);
 
 	CodeMapData m_data;
 	FilePath m_root;
@@ -70,11 +90,22 @@ private:
 
 	QString m_notesPath;
 	QJsonObject m_notes;
+	QDateTime m_notesStamp;
+	qint64 m_notesSize = -1;
+	QString m_loadedText;
+	QString m_loadedFeature;
 	QSet<QString> m_expanded;
+
+	QString m_layoutPath;
+	QJsonObject m_layout;
 
 	QString m_currentKey;
 	FilePath m_currentPath;
 	Id m_currentFileId = 0;
+
+	std::map<Id, QGraphicsRectItem*> m_nodeItems;
+	QGraphicsRectItem* m_highlighted = nullptr;
+	QPen m_highlightedPen;
 
 	QComboBox* m_grouping;
 	QLabel* m_stats;
@@ -89,6 +120,9 @@ private:
 	QPushButton* m_askButton;
 	QTextBrowser* m_answer;
 	QProcess* m_ask = nullptr;
+	QString m_chatSession;
+	QString m_chatLog;
+	QString m_chatContextKey;
 
 	QtThreadedLambdaFunctor m_onQtThread;
 };

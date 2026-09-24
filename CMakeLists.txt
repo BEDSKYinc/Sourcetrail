@@ -559,6 +559,8 @@ add_subdirectory(src/indexer)
 
 function(copyAppFiles configDir)
 	copyFile("src/app/Sourcetrail.ico" "${configDir}/app/Sourcetrail.ico")
+	# the chat box hands this to claude via --mcp-config, so it must sit next to the binary
+	copyFile("rust_indexer/mcp_server.py" "${configDir}/app/mcp_server.py")
 	if (UNIX)
 		copyFile("scripts/Sourcetrail.sh"      "${configDir}/app/Sourcetrail.sh")
 		copyFile("scripts/resetPreferences.sh" "${configDir}/app/resetPreferences.sh")

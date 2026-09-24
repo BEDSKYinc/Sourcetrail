@@ -5,6 +5,7 @@
 #include <set>
 
 #include <QBoxLayout>
+#include <QCoreApplication>
 #include <QComboBox>
 #include <QFile>
 #include <QGraphicsPathItem>
@@ -14,7 +15,11 @@
 #include <QGraphicsSimpleTextItem>
 #include <QGraphicsView>
 #include <QWheelEvent>
+#include <QFileInfo>
+#include <QJsonArray>
 #include <QJsonDocument>
+#include <QMouseEvent>
+#include <QScrollBar>
 #include <QLabel>
 #include <QLineEdit>
 #include <QProcess>
@@ -157,18 +162,44 @@ std::map<QString, int> layerGroups(
 	return layer;
 }
 
+// A node the user can drag. Everything else about it is a plain rect item; the only care needed
+// is telling a click apart from a drag, because both start with the same press.
 class MapItem: public QGraphicsRectItem
 {
 public:
-	MapItem(QtCodeMap* map, const QString& group, Id fileId)
-		: m_map(map), m_group(group), m_fileId(fileId)
+	MapItem(QtCodeMap* map, const QString& group, Id fileId, const QString& layoutKey)
+		: m_map(map), m_group(group), m_fileId(fileId), m_layoutKey(layoutKey)
 	{
+		setFlag(QGraphicsItem::ItemIsMovable, true);
+		setCursor(Qt::OpenHandCursor);
 	}
 
 protected:
 	void mousePressEvent(QGraphicsSceneMouseEvent* event) override
 	{
-		if (m_fileId)
+		m_pressedAt = event->scenePos();
+		m_moved = false;
+		QGraphicsRectItem::mousePressEvent(event);
+	}
+
+	void mouseMoveEvent(QGraphicsSceneMouseEvent* event) override
+	{
+		if ((event->scenePos() - m_pressedAt).manhattanLength() > 4)
+		{
+			m_moved = true;
+		}
+		QGraphicsRectItem::mouseMoveEvent(event);
+	}
+
+	void mouseReleaseEvent(QGraphicsSceneMouseEvent* event) override
+	{
+		QGraphicsRectItem::mouseReleaseEvent(event);
+
+		if (m_moved)
+		{
+			m_map->nodeMoved(m_layoutKey, pos());
+		}
+		else if (m_fileId)
 		{
 			m_map->activateFile(m_fileId);
 		}
@@ -183,6 +214,9 @@ private:
 	QtCodeMap* m_map;
 	QString m_group;
 	Id m_fileId;
+	QString m_layoutKey;
+	QPointF m_pressedAt;
+	bool m_moved = false;
 };
 
 class MapView: public QGraphicsView
@@ -190,18 +224,77 @@ class MapView: public QGraphicsView
 public:
 	using QGraphicsView::QGraphicsView;
 
+	// Plain wheel zooms, like every other map. The clamp keeps a fast scroll from leaving the
+	// map as a single pixel or as one node filling the window.
+	void zoom(double factor)
+	{
+		const double now = transform().m11();
+		const double next = std::min(5.0, std::max(0.03, now * factor));
+		if (now > 0 && !qFuzzyCompare(next, now))
+		{
+			const double applied = next / now;
+			scale(applied, applied);
+		}
+	}
+
 protected:
 	void wheelEvent(QWheelEvent* event) override
 	{
-		if (event->modifiers() & Qt::ControlModifier)
+		if (event->angleDelta().y() != 0)
 		{
-			const double factor = event->angleDelta().y() > 0 ? 1.15 : 1.0 / 1.15;
-			scale(factor, factor);
+			zoom(event->angleDelta().y() > 0 ? 1.15 : 1.0 / 1.15);
 			event->accept();
 			return;
 		}
 		QGraphicsView::wheelEvent(event);
 	}
+
+	// Panning is the middle button, or the left button on empty canvas. It cannot be
+	// ScrollHandDrag any more: that mode eats the very drags the nodes now need.
+	void mousePressEvent(QMouseEvent* event) override
+	{
+		const bool onCanvas = itemAt(event->pos()) == nullptr;
+		if (event->button() == Qt::MiddleButton ||
+			(event->button() == Qt::LeftButton && onCanvas))
+		{
+			m_panFrom = event->pos();
+			m_panning = true;
+			setCursor(Qt::ClosedHandCursor);
+			event->accept();
+			return;
+		}
+		QGraphicsView::mousePressEvent(event);
+	}
+
+	void mouseMoveEvent(QMouseEvent* event) override
+	{
+		if (m_panning)
+		{
+			const QPoint delta = event->pos() - m_panFrom;
+			m_panFrom = event->pos();
+			horizontalScrollBar()->setValue(horizontalScrollBar()->value() - delta.x());
+			verticalScrollBar()->setValue(verticalScrollBar()->value() - delta.y());
+			event->accept();
+			return;
+		}
+		QGraphicsView::mouseMoveEvent(event);
+	}
+
+	void mouseReleaseEvent(QMouseEvent* event) override
+	{
+		if (m_panning)
+		{
+			m_panning = false;
+			unsetCursor();
+			event->accept();
+			return;
+		}
+		QGraphicsView::mouseReleaseEvent(event);
+	}
+
+private:
+	QPoint m_panFrom;
+	bool m_panning = false;
 };
 }	 // namespace
 
@@ -229,6 +322,23 @@ QtCodeMap::QtCodeMap(QWidget* parent): QWidget(parent)
 	toolbar->addWidget(collapse);
 	QPushButton* reload = new QPushButton(QStringLiteral("Neu laden"), left);
 	toolbar->addWidget(reload);
+
+	QPushButton* zoomOut = new QPushButton(QStringLiteral("−"), left);
+	zoomOut->setToolTip(QStringLiteral("Herauszoomen (Mausrad)"));
+	zoomOut->setFixedWidth(28);
+	toolbar->addWidget(zoomOut);
+	QPushButton* zoomIn = new QPushButton(QStringLiteral("+"), left);
+	zoomIn->setToolTip(QStringLiteral("Hineinzoomen (Mausrad)"));
+	zoomIn->setFixedWidth(28);
+	toolbar->addWidget(zoomIn);
+	QPushButton* fit = new QPushButton(QStringLiteral("Alles zeigen"), left);
+	fit->setToolTip(QStringLiteral("Ganze Karte ins Fenster (Ziehen: mittlere Maustaste)"));
+	toolbar->addWidget(fit);
+
+	QPushButton* resetLayout = new QPushButton(QStringLiteral("Anordnung zurücksetzen"), left);
+	resetLayout->setToolTip(QStringLiteral("Verschobene Knoten wieder ins Raster stellen"));
+	toolbar->addWidget(resetLayout);
+
 	m_stats = new QLabel(left);
 	toolbar->addWidget(m_stats);
 	toolbar->addStretch();
@@ -237,7 +347,8 @@ QtCodeMap::QtCodeMap(QWidget* parent): QWidget(parent)
 	m_scene = new QGraphicsScene(this);
 	m_view = new MapView(m_scene, left);
 	m_view->setRenderHint(QPainter::Antialiasing);
-	m_view->setDragMode(QGraphicsView::ScrollHandDrag);
+	m_view->setDragMode(QGraphicsView::NoDrag);
+	m_view->setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
 	leftLayout->addWidget(m_view);
 
 	// note and question side
@@ -259,17 +370,25 @@ QtCodeMap::QtCodeMap(QWidget* parent): QWidget(parent)
 	m_note->setAcceptRichText(false);
 	rightLayout->addWidget(m_note, 2);
 
-	rightLayout->addWidget(new QLabel(QStringLiteral("Frage zur Auswahl"), right));
+	QHBoxLayout* chatHead = new QHBoxLayout();
+	chatHead->addWidget(new QLabel(QStringLiteral("Chat zur Auswahl"), right));
+	chatHead->addStretch();
+	QPushButton* newChat = new QPushButton(QStringLiteral("Neuer Chat"), right);
+	newChat->setToolTip(QStringLiteral("Gespräch vergessen und von vorne anfangen"));
+	chatHead->addWidget(newChat);
+	rightLayout->addLayout(chatHead);
+
+	m_answer = new QTextBrowser(right);
+	m_answer->setOpenExternalLinks(true);
+	rightLayout->addWidget(m_answer, 3);
+
 	QHBoxLayout* askLayout = new QHBoxLayout();
 	m_question = new QLineEdit(right);
 	m_question->setPlaceholderText(QStringLiteral("Was macht das hier?"));
 	askLayout->addWidget(m_question);
-	m_askButton = new QPushButton(QStringLiteral("Fragen"), right);
+	m_askButton = new QPushButton(QStringLiteral("Senden"), right);
 	askLayout->addWidget(m_askButton);
 	rightLayout->addLayout(askLayout);
-
-	m_answer = new QTextBrowser(right);
-	rightLayout->addWidget(m_answer, 3);
 
 	splitter->setStretchFactor(0, 3);
 	splitter->setStretchFactor(1, 1);
@@ -284,11 +403,26 @@ QtCodeMap::QtCodeMap(QWidget* parent): QWidget(parent)
 		rebuild();
 	});
 	connect(reload, &QPushButton::clicked, this, &QtCodeMap::refresh);
+	connect(zoomIn, &QPushButton::clicked, this, [this]() { zoomBy(1.25); });
+	connect(zoomOut, &QPushButton::clicked, this, [this]() { zoomBy(1.0 / 1.25); });
+	connect(fit, &QPushButton::clicked, this, &QtCodeMap::zoomFit);
+	connect(resetLayout, &QPushButton::clicked, this, [this]() {
+		m_layout.remove(layoutMode());
+		saveLayout();
+		rebuild();
+		zoomFit();
+	});
 	connect(m_noteTimer, &QTimer::timeout, this, &QtCodeMap::saveNote);
 	connect(m_note, &QTextEdit::textChanged, this, [this]() { m_noteTimer->start(); });
 	connect(m_feature, &QLineEdit::textEdited, this, [this]() { m_noteTimer->start(); });
 	connect(m_askButton, &QPushButton::clicked, this, &QtCodeMap::ask);
 	connect(m_question, &QLineEdit::returnPressed, this, &QtCodeMap::ask);
+	connect(newChat, &QPushButton::clicked, this, [this]() {
+		m_chatSession.clear();
+		m_chatContextKey.clear();
+		m_chatLog.clear();
+		m_answer->clear();
+	});
 }
 
 QtCodeMap::~QtCodeMap()
@@ -342,17 +476,96 @@ void QtCodeMap::refresh()
 	m_root = FilePath(slash == std::string::npos ? root : root.substr(0, slash));
 
 	const FilePath projectPath = Application::getInstance()->getCurrentProjectPath();
+	const FilePath projectDir = projectPath.getParentDirectory();
 	m_notesPath = QString::fromStdString(
-		projectPath.getParentDirectory().concatenate(FilePath("codemap-notes.json")).str());
+		projectDir.getConcatenated(FilePath("codemap-notes.json")).str());
 	m_notes = QJsonObject();
-	QFile notes(m_notesPath);
-	if (notes.open(QIODevice::ReadOnly))
+	m_notesStamp = QDateTime();
+	m_notesSize = -1;
+	reloadNotesIfChanged();
+
+	m_layoutPath = QString::fromStdString(
+		projectDir.getConcatenated(FilePath("codemap-layout.json")).str());
+	m_layout = QJsonObject();
+	QFile layout(m_layoutPath);
+	if (layout.open(QIODevice::ReadOnly))
 	{
-		m_notes = QJsonDocument::fromJson(notes.readAll()).object();
+		m_layout = QJsonDocument::fromJson(layout.readAll()).object();
 	}
 
 	m_expanded.clear();
 	rebuild();
+	zoomFit();
+}
+
+// The map keeps the whole notes file in memory, so anything written to it from outside — a
+// script, another editor, a second window — is invisible until it is read back. Every write
+// therefore starts from what is on disk, and only the note being edited is laid on top.
+void QtCodeMap::reloadNotesIfChanged()
+{
+	if (m_notesPath.isEmpty())
+	{
+		return;
+	}
+
+	const QFileInfo info(m_notesPath);
+	if (info.lastModified() == m_notesStamp && info.size() == m_notesSize)
+	{
+		return;
+	}
+
+	QFile file(m_notesPath);
+	if (file.open(QIODevice::ReadOnly))
+	{
+		m_notes = QJsonDocument::fromJson(file.readAll()).object();
+		m_notesStamp = info.lastModified();
+		m_notesSize = info.size();
+	}
+}
+
+QString QtCodeMap::layoutMode() const
+{
+	return m_grouping->currentIndex() == 1 ? QStringLiteral("feature") : QStringLiteral("directory");
+}
+
+QJsonObject QtCodeMap::layoutOfMode() const
+{
+	return m_layout.value(layoutMode()).toObject();
+}
+
+void QtCodeMap::saveLayout()
+{
+	if (m_layoutPath.isEmpty())
+	{
+		return;
+	}
+	QFile file(m_layoutPath);
+	if (file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+	{
+		file.write(QJsonDocument(m_layout).toJson(QJsonDocument::Indented));
+	}
+}
+
+void QtCodeMap::nodeMoved(const QString& layoutKey, const QPointF& pos)
+{
+	QJsonObject mode = layoutOfMode();
+	mode[layoutKey] = QJsonArray({pos.x(), pos.y()});
+	m_layout[layoutMode()] = mode;
+	saveLayout();
+
+	// The dependency curves start and end at the old places now. Redrawing them means rebuilding
+	// the scene, and that deletes the item Qt is still handing this release event to — hence the
+	// detour through the event loop.
+	QTimer::singleShot(0, this, &QtCodeMap::rebuild);
+}
+
+void QtCodeMap::zoomBy(double factor)
+{
+	static_cast<MapView*>(m_view)->zoom(factor);
+}
+
+void QtCodeMap::zoomFit()
+{
 	m_view->fitInView(m_scene->sceneRect(), Qt::KeepAspectRatio);
 }
 
@@ -386,6 +599,9 @@ QString QtCodeMap::groupOf(size_t fileIndex) const
 void QtCodeMap::rebuild()
 {
 	m_scene->clear();
+	m_nodeItems.clear();
+	m_highlighted = nullptr;
+	const QJsonObject placed = layoutOfMode();
 
 	std::map<QString, std::vector<size_t>> groups;
 	std::map<Id, QString> fileGroup;
@@ -465,9 +681,14 @@ void QtCodeMap::rebuild()
 				rowHeight = 0;
 			}
 
-			MapItem* item = new MapItem(this, name, 0);
+			MapItem* item = new MapItem(this, name, 0, QStringLiteral("group:") + name);
 			item->setRect(0, 0, w, h);
 			item->setPos(x, y);
+			const QJsonArray groupPos = placed.value(QStringLiteral("group:") + name).toArray();
+			if (groupPos.size() == 2)
+			{
+				item->setPos(groupPos[0].toDouble(), groupPos[1].toDouble());
+			}
 			item->setBrush(color(groupColor.fill));
 			item->setPen(QPen(color(groupColor.border), 1));
 			item->setZValue(1);
@@ -494,15 +715,21 @@ void QtCodeMap::rebuild()
 						documented++;
 					}
 
-					MapItem* node = new MapItem(this, name, file.nodeId);
+					MapItem* node = new MapItem(this, name, file.nodeId, key);
 					node->setRect(0, 0, kFileW, kFileH);
 					node->setPos(
 						kPad + (i % cols) * (kFileW + kGap),
 						kHeader + kPad / 2 + (i / cols) * (kFileH + kGap));
+					const QJsonArray nodePos = placed.value(key).toArray();
+					if (nodePos.size() == 2)
+					{
+						node->setPos(nodePos[0].toDouble(), nodePos[1].toDouble());
+					}
 					node->setBrush(color(hasNote ? noteColor.fill : fileColor.fill));
 					node->setPen(QPen(color(hasNote ? noteColor.border : fileColor.border), 1));
 					node->setParentItem(item);
 					node->setToolTip(rel + QStringLiteral("\n%1 Symbole").arg(file.symbolCount));
+					m_nodeItems[file.nodeId] = node;
 
 					QString label = rel.section(QLatin1Char('/'), -1);
 					QGraphicsSimpleTextItem* text = new QGraphicsSimpleTextItem(label, node);
@@ -517,7 +744,8 @@ void QtCodeMap::rebuild()
 				}
 			}
 
-			rects[name] = QRectF(x, y, w, h);
+			// the curves below follow where the group actually sits, not where the grid put it
+			rects[name] = QRectF(item->pos(), QSizeF(w, h));
 			x += w + kGroupGap;
 			rowHeight = std::max(rowHeight, h);
 		}
@@ -563,6 +791,49 @@ void QtCodeMap::rebuild()
 						 .arg(m_data.files.size())
 						 .arg(names.size())
 						 .arg(documented));
+
+	// a rebuild throws away the items, so the selection has to be marked again
+	if (m_currentFileId)
+	{
+		highlight(m_currentFileId);
+	}
+}
+
+// Shows on the map what the rest of Sourcetrail is looking at: the group is opened if it was
+// collapsed, the node gets a ring, and the view scrolls to it. Without this the map and the code
+// view drift apart the moment a jump comes from the graph or from a search.
+void QtCodeMap::highlight(Id fileNodeId)
+{
+	if (m_highlighted)
+	{
+		m_highlighted->setPen(m_highlightedPen);
+		m_highlighted = nullptr;
+	}
+
+	auto item = m_nodeItems.find(fileNodeId);
+	if (item == m_nodeItems.end())
+	{
+		// the file is inside a collapsed group: open it and look again
+		auto file = m_fileIndex.find(fileNodeId);
+		if (file == m_fileIndex.end())
+		{
+			return;
+		}
+		const QString group = groupOf(file->second);
+		if (m_expanded.contains(group))
+		{
+			return;
+		}
+		m_expanded.insert(group);
+		rebuild();	  // rebuild highlights again at its end
+		return;
+	}
+
+	m_highlightedPen = item->second->pen();
+	QPen ring(color(GraphViewStyle::getNodeColor("file", true).border), 3);
+	item->second->setPen(ring);
+	m_highlighted = item->second;
+	m_view->ensureVisible(item->second, 80, 80);
 }
 
 void QtCodeMap::toggleGroup(const QString& group)
@@ -588,27 +859,37 @@ void QtCodeMap::activateFile(Id fileNodeId)
 
 	const CodeMapData::File& file = m_data.files[it->second];
 	const QString rel = relative(file.path);
-	select(QStringLiteral("file:") + rel, rel, file.path);
+	select(QStringLiteral("file:") + rel, rel, file.path, fileNodeId);
 
 	MessageActivateFile(file.path).dispatch();
 }
 
-void QtCodeMap::select(const QString& key, const QString& title, const FilePath& path)
+void QtCodeMap::select(const QString& key, const QString& title, const FilePath& path, Id fileNodeId)
 {
 	saveNote();
+	reloadNotesIfChanged();
 
 	m_currentKey = key;
 	m_currentPath = path;
+	m_currentFileId = fileNodeId;
 	m_title->setText(title);
 	showNote();
+
+	if (fileNodeId)
+	{
+		highlight(fileNodeId);
+	}
 }
 
 void QtCodeMap::showNote()
 {
+	m_loadedText = noteField(m_currentKey, QStringLiteral("text"));
+	m_loadedFeature = noteField(m_currentKey, QStringLiteral("feature"));
+
 	const bool blocked = m_note->blockSignals(true);
-	m_note->setPlainText(noteField(m_currentKey, QStringLiteral("text")));
+	m_note->setPlainText(m_loadedText);
 	m_note->blockSignals(blocked);
-	m_feature->setText(noteField(m_currentKey, QStringLiteral("feature")));
+	m_feature->setText(m_loadedFeature);
 }
 
 void QtCodeMap::saveNote()
@@ -620,11 +901,14 @@ void QtCodeMap::saveNote()
 
 	const QString text = m_note->toPlainText();
 	const QString feature = m_feature->text();
-	if (text == noteField(m_currentKey, QStringLiteral("text")) &&
-		feature == noteField(m_currentKey, QStringLiteral("feature")))
+	// Only what the user actually typed is written. Comparing against the file instead would
+	// hand a stale editor the power to undo an edit made outside the app.
+	if (text == m_loadedText && feature == m_loadedFeature)
 	{
 		return;
 	}
+
+	reloadNotesIfChanged();
 
 	if (text.isEmpty() && feature.isEmpty())
 	{
@@ -642,7 +926,56 @@ void QtCodeMap::saveNote()
 	if (file.open(QIODevice::WriteOnly | QIODevice::Truncate))
 	{
 		file.write(QJsonDocument(m_notes).toJson(QJsonDocument::Indented));
+		file.close();
+		const QFileInfo info(m_notesPath);
+		m_notesStamp = info.lastModified();
+		m_notesSize = info.size();
 	}
+
+	m_loadedText = text;
+	m_loadedFeature = feature;
+}
+
+// Hands the index itself to Claude, not just the source tree: the MCP server answers "who calls
+// this" from the same database the map is drawn from, which no amount of grepping does reliably.
+// Missing script or missing python is not an error — the chat then simply reads files.
+QString QtCodeMap::mcpConfig() const
+{
+	const FilePath script(
+		(QCoreApplication::applicationDirPath() + QStringLiteral("/mcp_server.py")).toStdString());
+	if (!script.exists())
+	{
+		return QString();
+	}
+
+	const FilePath db = Application::getInstance()->getCurrentProjectPath().replaceExtension("srctrldb");
+	if (!db.exists())
+	{
+		return QString();
+	}
+
+	QJsonObject server;
+	server[QStringLiteral("type")] = QStringLiteral("stdio");
+	server[QStringLiteral("command")] = QStringLiteral("python3");
+	server[QStringLiteral("args")] = QJsonArray({QString::fromStdString(script.str()),
+												 QStringLiteral("--db"),
+												 QString::fromStdString(db.str()),
+												 QStringLiteral("--crate-root"),
+												 QString::fromStdString(m_root.str())});
+
+	QJsonObject servers;
+	servers[QStringLiteral("index")] = server;
+	QJsonObject config;
+	config[QStringLiteral("mcpServers")] = servers;
+	return QString::fromUtf8(QJsonDocument(config).toJson(QJsonDocument::Compact));
+}
+
+void QtCodeMap::appendChat(const QString& who, const QString& text, const QString& color)
+{
+	m_chatLog += QStringLiteral("<p><b style=\"color:%1\">%2</b><br>%3</p>")
+					 .arg(color, who, text.toHtmlEscaped().replace(QLatin1Char('\n'), QStringLiteral("<br>")));
+	m_answer->setHtml(m_chatLog);
+	m_answer->verticalScrollBar()->setValue(m_answer->verticalScrollBar()->maximum());
 }
 
 void QtCodeMap::ask()
@@ -652,47 +985,93 @@ void QtCodeMap::ask()
 		return;
 	}
 
-	const QString what = m_currentKey.isEmpty() ? QStringLiteral("das Projekt") : m_title->text();
-	const QString prompt = QStringLiteral(
-							   "Frage zu %1 in dieser Codebase: %2\n"
-							   "Lies die Datei, bevor du antwortest.")
-							   .arg(what, m_question->text());
+	const QString question = m_question->text();
+	m_question->clear();
+	appendChat(QStringLiteral("Du"), question, QStringLiteral("#888"));
+
+	// The selection is only spelled out when it changed. Repeating it every turn would push the
+	// conversation back to the same file after each follow up question.
+	QString prompt;
+	if (m_chatContextKey != m_currentKey && !m_currentKey.isEmpty())
+	{
+		prompt = QStringLiteral("Es geht um %1.\n").arg(m_title->text());
+		const QString note = noteField(m_currentKey, QStringLiteral("text"));
+		if (!note.isEmpty())
+		{
+			prompt += QStringLiteral("Meine Notiz dazu: %1\n").arg(note);
+		}
+		m_chatContextKey = m_currentKey;
+	}
+	prompt += question;
+
+	QStringList args{QStringLiteral("-p"),
+					 prompt,
+					 QStringLiteral("--output-format"),
+					 QStringLiteral("json"),
+					 QStringLiteral("--append-system-prompt"),
+					 QStringLiteral("Du beantwortest Fragen zu dieser Codebase in der Landkarte "
+									"von Sourcetrail. Antworte auf Deutsch, in einfacher Sprache, "
+									"höchstens 12 Zeilen.")};
+
+	QString allowed = QStringLiteral("Read,Grep,Glob");
+	const QString mcp = mcpConfig();
+	if (!mcp.isEmpty())
+	{
+		args << QStringLiteral("--mcp-config") << mcp;
+		allowed += QStringLiteral(",mcp__index__symbol,mcp__index__search_symbols,mcp__index__file_symbols");
+	}
+	args << QStringLiteral("--allowedTools") << allowed;
+
+	// Same conversation as the previous question, so "und wer ruft das auf?" makes sense.
+	if (!m_chatSession.isEmpty())
+	{
+		args << QStringLiteral("--resume") << m_chatSession;
+	}
 
 	m_ask = new QProcess(this);
 	m_ask->setWorkingDirectory(QString::fromStdString(m_root.str()));
-	m_ask->setProcessChannelMode(QProcess::MergedChannels);
 	connect(m_ask, &QProcess::finished, this, &QtCodeMap::askFinished);
 
 	m_askButton->setEnabled(false);
-	m_answer->setPlainText(QStringLiteral("Claude denkt nach …"));
-	m_ask->start(
-		QStringLiteral("claude"),
-		{QStringLiteral("-p"),
-		 prompt,
-		 QStringLiteral("--allowedTools"),
-		 QStringLiteral("Read,Grep,Glob"),
-		 QStringLiteral("--append-system-prompt"),
-		 QStringLiteral("Antworte auf Deutsch, in einfacher Sprache, höchstens 12 Zeilen.")});
+	m_askButton->setText(QStringLiteral("…"));
+	m_ask->start(QStringLiteral("claude"), args);
 }
 
 void QtCodeMap::askFinished()
 {
-	const QString output = QString::fromUtf8(m_ask->readAll()).trimmed();
-	if (m_ask->exitStatus() != QProcess::NormalExit || m_ask->exitCode() != 0)
+	const QByteArray out = m_ask->readAllStandardOutput();
+	const QString err = QString::fromUtf8(m_ask->readAllStandardError()).trimmed();
+
+	const QJsonObject result = QJsonDocument::fromJson(out).object();
+	const QString answer = result.value(QStringLiteral("result")).toString();
+	const QString session = result.value(QStringLiteral("session_id")).toString();
+	if (!session.isEmpty())
 	{
-		m_answer->setPlainText(
-			output + QStringLiteral("\n\n(claude endete mit %1 – einmal `claude` im Terminal "
-									"starten und einloggen.)")
-						 .arg(m_ask->exitCode()));
+		m_chatSession = session;
+	}
+
+	// A failed login also comes back as a well formed answer, so the flag decides, not the text.
+	const bool failed = result.value(QStringLiteral("is_error")).toBool() ||
+		m_ask->exitCode() != 0 || answer.isEmpty();
+	if (!failed)
+	{
+		appendChat(QStringLiteral("Claude"), answer, QStringLiteral("#7ba7d7"));
 	}
 	else
 	{
-		m_answer->setPlainText(output);
+		appendChat(
+			QStringLiteral("Fehler"),
+			(answer.isEmpty() ? (err.isEmpty() ? QString::fromUtf8(out).trimmed() : err) : answer) +
+				QStringLiteral("\n\n(claude endete mit %1 – einmal `claude` im Terminal starten "
+							   "und einloggen.)")
+					.arg(m_ask->exitCode()),
+			QStringLiteral("#d77b7b"));
 	}
 
 	m_ask->deleteLater();
 	m_ask = nullptr;
 	m_askButton->setEnabled(true);
+	m_askButton->setText(QStringLiteral("Senden"));
 }
 
 void QtCodeMap::handleMessage(MessageActivateTokens* message)
@@ -715,18 +1094,32 @@ void QtCodeMap::handleMessage(MessageActivateTokens* message)
 		{
 			const CodeMapData::File& file = m_data.files[it->second];
 			const QString rel = relative(file.path);
-			select(QStringLiteral("file:") + rel, rel, file.path);
+			select(QStringLiteral("file:") + rel, rel, file.path, file.nodeId);
 			return;
 		}
 
-		// a symbol: note it under its own name, but point the question at its file
+		// a symbol: note it under its own name, but point the question at its file and light up
+		// that file on the map, so a jump from the graph does not leave the map behind
 		FilePath path;
 		StorageAccess* storage = Application::getInstance()->getStorageAccess();
 		for (const auto& parent: storage->getNodeIdToParentFileMap({tokenIds[0]}))
 		{
 			path = FilePath(parent.second.second.getQualifiedName());
 		}
-		select(QStringLiteral("sym:") + title, title, path);
+
+		Id fileNodeId = 0;
+		if (!path.empty())
+		{
+			for (const auto& file: m_data.files)
+			{
+				if (file.path == path)
+				{
+					fileNodeId = file.nodeId;
+					break;
+				}
+			}
+		}
+		select(QStringLiteral("sym:") + title, title, path, fileNodeId);
 	});
 }
 
