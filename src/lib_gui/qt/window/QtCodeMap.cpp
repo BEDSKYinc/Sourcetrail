@@ -38,6 +38,8 @@ const int kGap = 6;
 const int kPad = 10;
 const int kGroupGap = 40;
 const int kLayerGap = 70;
+// A layer with many groups is wrapped here, otherwise one row runs off to the right forever.
+const qreal kRowWidth = 2400;
 
 QColor color(const std::string& c)
 {
@@ -432,10 +434,17 @@ void QtCodeMap::rebuild()
 			qreal h = kHeader + kPad;
 			if (expanded)
 			{
-				cols = std::min<int>(4, std::max<int>(1, static_cast<int>(std::ceil(std::sqrt(files.size())))));
+				cols = std::min<int>(8, std::max<int>(1, static_cast<int>(std::ceil(std::sqrt(files.size())))));
 				rows = static_cast<int>((files.size() + cols - 1) / cols);
 				w = 2 * kPad + cols * kFileW + (cols - 1) * kGap;
 				h = kHeader + kPad + rows * (kFileH + kGap);
+			}
+
+			if (x > 0 && x + w > kRowWidth)
+			{
+				x = 0;
+				y += rowHeight + kGap;
+				rowHeight = 0;
 			}
 
 			MapItem* item = new MapItem(this, name, 0);
