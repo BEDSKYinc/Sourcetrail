@@ -14,6 +14,7 @@
 #include <QGraphicsSceneMouseEvent>
 #include <QGraphicsSimpleTextItem>
 #include <QGraphicsView>
+#include <QHash>
 #include <QWheelEvent>
 #include <QFileInfo>
 #include <QJsonArray>
@@ -32,6 +33,7 @@
 
 #include "Application.h"
 #include "GraphViewStyle.h"
+#include "logging.h"
 #include "MessageActivateFile.h"
 #include "StorageAccess.h"
 
@@ -591,6 +593,8 @@ void QtCodeMap::refresh()
 		m_layout = QJsonDocument::fromJson(layout.readAll()).object();
 	}
 
+	followRenames();
+
 	// The grouping is a way of looking at one project, not a passing choice — it belongs next to
 	// the hand placed nodes and comes back with them. Blocked, because setting it here would
 	// rebuild a map that refresh() is about to build anyway.
@@ -685,6 +689,107 @@ void QtCodeMap::zoomBy(double factor)
 void QtCodeMap::zoomFit()
 {
 	m_view->fitInView(m_scene->sceneRect(), Qt::KeepAspectRatio);
+}
+
+void QtCodeMap::writeNotes()
+{
+	QFile file(m_notesPath);
+	if (file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+	{
+		file.write(QJsonDocument(m_notes).toJson(QJsonDocument::Indented));
+		file.close();
+		const QFileInfo info(m_notesPath);
+		m_notesStamp = info.lastModified();
+		m_notesSize = info.size();
+	}
+}
+
+// A note is keyed by path, so a renamed file leaves its description behind on a name that no
+// longer exists while the file itself turns up undescribed. git knows what became of it, so the
+// notes without a file are looked up there and carried over. Only the orphans cost anything, and
+// only they trigger the git call.
+void QtCodeMap::followRenames()
+{
+	QSet<QString> indexed;
+	for (const CodeMapData::File& file: m_data.files)
+	{
+		indexed.insert(relative(file.path));
+	}
+
+	QStringList orphans;
+	for (const QString& key: m_notes.keys())
+	{
+		if (key.startsWith(QStringLiteral("file:")) && !indexed.contains(key.mid(5)))
+		{
+			orphans.append(key.mid(5));
+		}
+	}
+	if (orphans.isEmpty())
+	{
+		return;
+	}
+
+	QProcess git;
+	git.setWorkingDirectory(QString::fromStdString(m_root.str()));
+	git.start(QStringLiteral("git"),
+			  {QStringLiteral("log"),
+			   QStringLiteral("--diff-filter=R"),
+			   QStringLiteral("-M"),
+			   QStringLiteral("--name-status"),
+			   QStringLiteral("--format="),
+			   QStringLiteral("-n"),
+			   QStringLiteral("2000")});
+	if (!git.waitForFinished(10000) || git.exitCode() != 0)
+	{
+		return;
+	}
+
+	// Newest commit first, so a file renamed twice is already known by its final name when the
+	// earlier rename is read: every step points straight at where the file ended up.
+	QHash<QString, QString> renamed;
+	const QList<QByteArray> lines = git.readAllStandardOutput().split('\n');
+	for (const QByteArray& line: lines)
+	{
+		const QList<QByteArray> parts = line.split('\t');
+		if (!line.startsWith('R') || parts.size() < 3)
+		{
+			continue;
+		}
+		const QString from = QString::fromUtf8(parts[1].trimmed());
+		const QString to = QString::fromUtf8(parts[2].trimmed());
+		renamed[from] = renamed.value(to, to);
+	}
+
+	bool changed = false;
+	for (const QString& orphan: orphans)
+	{
+		const QString now = renamed.value(orphan);
+		const QString oldKey = QStringLiteral("file:") + orphan;
+		const QString newKey = QStringLiteral("file:") + now;
+		// A note already sitting on the new name wins: it describes the file as it is today.
+		if (now.isEmpty() || !indexed.contains(now) || m_notes.contains(newKey))
+		{
+			continue;
+		}
+		m_notes[newKey] = m_notes.take(oldKey);
+		for (const QString& mode: {QStringLiteral("directory"), QStringLiteral("feature")})
+		{
+			QJsonObject placed = m_layout.value(mode).toObject();
+			if (placed.contains(oldKey))
+			{
+				placed[newKey] = placed.take(oldKey);
+				m_layout[mode] = placed;
+			}
+		}
+		changed = true;
+		LOG_INFO("code map: note followed " + orphan.toStdString() + " -> " + now.toStdString());
+	}
+
+	if (changed)
+	{
+		writeNotes();
+		saveLayout();
+	}
 }
 
 QString QtCodeMap::relative(const FilePath& path) const
@@ -1148,15 +1253,7 @@ void QtCodeMap::saveNote()
 		m_notes[m_currentKey] = note;
 	}
 
-	QFile file(m_notesPath);
-	if (file.open(QIODevice::WriteOnly | QIODevice::Truncate))
-	{
-		file.write(QJsonDocument(m_notes).toJson(QJsonDocument::Indented));
-		file.close();
-		const QFileInfo info(m_notesPath);
-		m_notesStamp = info.lastModified();
-		m_notesSize = info.size();
-	}
+	writeNotes();
 
 	m_loadedText = text;
 	m_loadedFeature = feature;

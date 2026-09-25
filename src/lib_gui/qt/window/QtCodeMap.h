@@ -71,6 +71,10 @@ private:
 
 	// notes on disk can change under an open map, so they are re-read before every write
 	void reloadNotesIfChanged();
+	void writeNotes();
+
+	// renamed files keep their note: git is asked what became of a note without a file
+	void followRenames();
 
 	// hand placed nodes, per grouping mode, next to the notes
 	QString layoutMode() const;
