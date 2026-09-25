@@ -425,7 +425,14 @@ def main(argv):
     if not db or not root:
         sys.exit(__doc__)
     here = os.path.dirname(os.path.abspath(__file__))
-    indexer = args.get("--indexer", os.path.join(here, "target/release/sourcetrail_rust_indexer"))
+    # In the checkout this file sits in rust_indexer/ next to target/; installed it sits in
+    # app/ and the binary is mirrored one level up. The Python and TypeScript indexers are
+    # found by the same relative path in both layouts, only this one moves.
+    rust = "target/release/sourcetrail_rust_indexer"
+    indexer = args.get("--indexer") or next(
+        (c for c in (os.path.join(here, rust),
+                     os.path.join(os.path.dirname(here), "rust_indexer", rust)) if os.path.exists(c)),
+        os.path.join(here, rust))
     py_indexer = args.get("--python-indexer", os.path.join(
         os.path.dirname(here), "python_indexer/sourcetrail_python_indexer.py"))
     ts_indexer = args.get("--typescript-indexer", os.path.join(

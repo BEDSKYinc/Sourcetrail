@@ -51,6 +51,19 @@ for item in "$BUILD_DIR"/app/*; do
     mv "$PREFIX/app/$name.new" "$PREFIX/app/$name"
 done
 
+# The three indexers are not part of the CMake build: the Rust one is a cargo
+# binary, the other two are scripts. They are mirrored in the source layout,
+# because the TypeScript one reaches sideways for the other two.
+echo "==> indexer $PREFIX"
+mkdir -p "$PREFIX/rust_indexer/target/release" "$PREFIX/python_indexer" "$PREFIX/ts_indexer"
+[ -f "$SRC/rust_indexer/target/release/sourcetrail_rust_indexer" ] &&
+    cp "$SRC/rust_indexer/target/release/sourcetrail_rust_indexer" \
+       "$PREFIX/rust_indexer/target/release/sourcetrail_rust_indexer.new" &&
+    mv "$PREFIX/rust_indexer/target/release/sourcetrail_rust_indexer.new" \
+       "$PREFIX/rust_indexer/target/release/sourcetrail_rust_indexer"
+cp "$SRC/python_indexer/sourcetrail_python_indexer.py" "$PREFIX/python_indexer/"
+cp "$SRC/ts_indexer/sourcetrail_ts_indexer.py" "$SRC/ts_indexer/ts_facts.mjs" "$PREFIX/ts_indexer/"
+
 echo "==> launcher $BINDIR/sourcetrail-assetbridge"
 cp "$HERE/sourcetrail-assetbridge" "$BINDIR/sourcetrail-assetbridge"
 chmod +x "$BINDIR/sourcetrail-assetbridge"
