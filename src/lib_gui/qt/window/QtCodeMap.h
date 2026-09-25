@@ -4,6 +4,7 @@
 #include <map>
 
 #include <QDateTime>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QPen>
 #include <QSet>
@@ -98,6 +99,9 @@ private:
 
 	QString m_layoutPath;
 	QJsonObject m_layout;
+
+	// hand written pipeline order for the feature view: one row per stage, import first
+	QJsonArray m_stages;
 
 	QString m_currentKey;
 	FilePath m_currentPath;

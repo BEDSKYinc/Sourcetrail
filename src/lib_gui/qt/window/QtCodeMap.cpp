@@ -24,6 +24,7 @@
 #include <QLineEdit>
 #include <QProcess>
 #include <QPushButton>
+#include <QSignalBlocker>
 #include <QSplitter>
 #include <QTextBrowser>
 #include <QTextEdit>
@@ -486,7 +487,15 @@ QtCodeMap::QtCodeMap(QWidget* parent): QWidget(parent)
 	m_noteTimer->setSingleShot(true);
 	m_noteTimer->setInterval(1200);
 
-	connect(m_grouping, &QComboBox::currentIndexChanged, this, &QtCodeMap::rebuild);
+	// Refitting is not cosmetic: the two modes build scenes of wildly different size — directory
+	// starts with every group open, feature with every group shut — so keeping the old zoom across
+	// a switch leaves the new map as a stamp in the corner.
+	connect(m_grouping, &QComboBox::currentIndexChanged, this, [this]() {
+		m_layout[QStringLiteral("grouping")] = layoutMode();
+		saveLayout();
+		rebuild();
+		zoomFit();
+	});
 	connect(collapse, &QPushButton::clicked, this, [this]() {
 		m_expanded.clear();
 		rebuild();
@@ -580,6 +589,26 @@ void QtCodeMap::refresh()
 	if (layout.open(QIODevice::ReadOnly))
 	{
 		m_layout = QJsonDocument::fromJson(layout.readAll()).object();
+	}
+
+	// The grouping is a way of looking at one project, not a passing choice — it belongs next to
+	// the hand placed nodes and comes back with them. Blocked, because setting it here would
+	// rebuild a map that refresh() is about to build anyway.
+	{
+		const QSignalBlocker blocker(m_grouping);
+		m_grouping->setCurrentIndex(
+			m_layout.value(QStringLiteral("grouping")).toString() == QStringLiteral("feature") ? 1 : 0);
+	}
+
+	// Optional: [{ "stufe": "1 · Hinein", "features": [...] }, ...]. Without it the feature view
+	// falls back to the computed layering, which orders by who calls whom — useful, but it cannot
+	// know that a file travels from the scanner to the export.
+	m_stages = QJsonArray();
+	QFile stages(QString::fromStdString(
+		projectDir.getConcatenated(FilePath("codemap-stages.json")).str()));
+	if (stages.open(QIODevice::ReadOnly))
+	{
+		m_stages = QJsonDocument::fromJson(stages.readAll()).array();
 	}
 
 	m_expanded.clear();
@@ -726,7 +755,35 @@ void QtCodeMap::rebuild()
 		}
 	}
 
-	const std::map<QString, int> layers = layerGroups(names, deps);
+	// The pipeline order wins where it is given: the stages file says how an asset travels, the
+	// call graph only says who talks to whom. Anything the file forgot lands in a row of its own
+	// at the bottom rather than silently joining a stage it does not belong to.
+	std::map<QString, int> layers;
+	std::map<int, QString> stageLabels;
+	if (m_grouping->currentIndex() == 1 && !m_stages.isEmpty())
+	{
+		for (int i = 0; i < m_stages.size(); i++)
+		{
+			const QJsonObject stage = m_stages.at(i).toObject();
+			stageLabels[i] = stage.value(QStringLiteral("stufe")).toString();
+			for (const QJsonValue& feature: stage.value(QStringLiteral("features")).toArray())
+			{
+				layers[feature.toString()] = i;
+			}
+		}
+		for (const QString& name: names)
+		{
+			if (!layers.count(name))
+			{
+				layers[name] = static_cast<int>(m_stages.size());
+				stageLabels[static_cast<int>(m_stages.size())] = QStringLiteral("Ohne Stufe");
+			}
+		}
+	}
+	else
+	{
+		layers = layerGroups(names, deps);
+	}
 
 	const GraphViewStyle::NodeColor groupColor = GraphViewStyle::getNodeColor("namespace", false);
 	const GraphViewStyle::NodeColor fileColor = GraphViewStyle::getNodeColor("file", false);
@@ -741,32 +798,99 @@ void QtCodeMap::rebuild()
 	}
 	orderLayers(byLayer, layers, deps);
 
+	// A row is centred, so it has to be measured before its first group is placed. Left aligned
+	// rows stack into a column and the flow reads as a list; centred they read as one spine with
+	// the stages strung along it.
+	std::map<QString, qreal> widths;
+	for (const QString& name: names)
+	{
+		const size_t count = groups[name].size();
+		if (m_expanded.contains(name))
+		{
+			const int cols = std::min<int>(
+				8, std::max<int>(1, static_cast<int>(std::ceil(std::sqrt(count)))));
+			widths[name] = 2 * kPad + cols * kFileW + (cols - 1) * kGap;
+		}
+		else
+		{
+			widths[name] = kFileW + 2 * kPad;
+		}
+	}
+
+	std::map<int, qreal> rowStarts;
+	qreal labelX = 0;
+	for (const auto& layer: byLayer)
+	{
+		// The wrap is walked here exactly as it is walked below, because a row that breaks into
+		// two lines has to be centred on its widest line — centring it on the sum instead pushes
+		// it off the axis, and one stage sitting off to the side breaks the whole column.
+		qreal x = 0;
+		qreal widest = 0;
+		for (const QString& name: layer.second)
+		{
+			if (x > 0 && x + widths[name] > kRowWidth)
+			{
+				widest = std::max(widest, x - kGroupGap);
+				x = 0;
+			}
+			x += widths[name] + kGroupGap;
+		}
+		rowStarts[layer.first] = -std::max(widest, x - kGroupGap) / 2;
+		labelX = std::min(labelX, rowStarts[layer.first]);
+	}
+
 	qreal y = 0;
 	size_t documented = 0;
 	for (const auto& layer: byLayer)
 	{
-		qreal x = 0;
+		const qreal rowStart = rowStarts.at(layer.first);
+		qreal x = rowStart;
 		qreal rowHeight = 0;
+
+		auto label = stageLabels.find(layer.first);
+		if (label != stageLabels.end() && !label->second.isEmpty())
+		{
+			QGraphicsSimpleTextItem* text = m_scene->addSimpleText(label->second);
+			QFont labelFont = text->font();
+			labelFont.setBold(true);
+			text->setFont(labelFont);
+			// The group text colour is meant to sit on the group's own fill; out here on the dark
+			// background it is all but black. The fill colour is the readable half of that pair.
+			text->setBrush(color(groupColor.fill));
+			text->setPos(labelX - text->boundingRect().width() - 2 * kGroupGap, y + 4);
+			text->setZValue(1);
+		}
 		for (const QString& name: layer.second)
 		{
 			const std::vector<size_t>& files = groups[name];
 			const bool expanded = m_expanded.contains(name);
 
+			// Counted here and not while drawing: collapsed groups draw no file nodes, so a folded
+			// map used to report zero described files even when every single one carries a note.
+			for (size_t index: files)
+			{
+				if (!noteField(QStringLiteral("file:") + relative(m_data.files[index].path),
+							   QStringLiteral("text"))
+						 .isEmpty())
+				{
+					documented++;
+				}
+			}
+
 			int cols = 1;
 			int rows = 0;
-			qreal w = kFileW + 2 * kPad;
+			const qreal w = widths.at(name);
 			qreal h = kHeader + kPad;
 			if (expanded)
 			{
 				cols = std::min<int>(8, std::max<int>(1, static_cast<int>(std::ceil(std::sqrt(files.size())))));
 				rows = static_cast<int>((files.size() + cols - 1) / cols);
-				w = 2 * kPad + cols * kFileW + (cols - 1) * kGap;
 				h = kHeader + kPad + rows * (kFileH + kGap);
 			}
 
-			if (x > 0 && x + w > kRowWidth)
+			if (x > rowStart && x + w > rowStart + kRowWidth)
 			{
-				x = 0;
+				x = rowStart;
 				y += rowHeight + kGap;
 				rowHeight = 0;
 			}
@@ -800,10 +924,6 @@ void QtCodeMap::rebuild()
 					const QString rel = relative(file.path);
 					const QString key = QStringLiteral("file:") + rel;
 					const bool hasNote = !noteField(key, QStringLiteral("text")).isEmpty();
-					if (hasNote)
-					{
-						documented++;
-					}
 
 					MapItem* node = new MapItem(this, name, file.nodeId, key);
 					node->setRect(0, 0, kFileW, kFileH);
@@ -862,8 +982,16 @@ void QtCodeMap::rebuild()
 
 		const QRectF source = rects[dep.first.first];
 		const QRectF target = rects[dep.first.second];
-		const QPointF from(source.center().x(), source.bottom());
-		const QPointF to(target.center().x(), target.top());
+
+		// Anchored by where the two groups sit, not by who calls whom. In a pipeline most calls
+		// point back up the flow — the exporter calls the database, not the other way round — and
+		// leaving those from the bottom edge sent every single one on a loop around the whole map.
+		// The map draws no arrow heads anyway; the stage rows carry the direction.
+		const bool downward = source.center().y() <= target.center().y();
+		const QRectF& upper = downward ? source : target;
+		const QRectF& lower = downward ? target : source;
+		const QPointF from(upper.center().x(), upper.bottom());
+		const QPointF to(lower.center().x(), lower.top());
 
 		QPainterPath path(from);
 		const qreal bend = std::max<qreal>(40, std::abs(to.y() - from.y()) / 2);
