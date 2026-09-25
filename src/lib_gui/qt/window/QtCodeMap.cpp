@@ -46,6 +46,13 @@ const int kLayerGap = 70;
 // A layer with many groups is wrapped here, otherwise one row runs off to the right forever.
 const qreal kRowWidth = 2400;
 
+// Only a group's real ties get a curve: everything under this share of its strongest one is
+// dropped. Drawing all of them was the reason the feature view read as a hairball — 228 curves
+// between 25 groups, 4982 crossings, and no ordering can fix that many. At a fifth the map keeps
+// three quarters of all connections in 64 curves and 138 crossings. Fading the weak ones instead
+// of dropping them did not work: a whisper is still a line, and there were two hundred of them.
+const qreal kCurveShare = 0.20;
+
 QColor color(const std::string& c)
 {
 	return QColor(QString::fromStdString(c));
@@ -160,6 +167,88 @@ std::map<QString, int> layerGroups(
 		}
 	}
 	return layer;
+}
+
+// Sorts the groups inside a layer so the connected ones stand next to each other.
+//
+// The layering above only says how deep a group sits; left to right it was the order the groups
+// came out of the map, which is alphabetical. That is why the feature view looked like a hairball:
+// two features that only talk to each other could sit at opposite ends of a row with their curve
+// crossing everything in between, and nothing about the picture said they belonged together.
+//
+// These are the usual barycentre sweeps. Every group moves to the average place of what it is
+// connected to, weighted by how many connections that is, looking up on one pass and down on the
+// next so both ends of a curve get a say. Six passes settle a map this size. Positions are kept
+// normalised to 0..1 because layers hold anywhere from one to a dozen groups, and a raw index
+// would make the third group of a short row look far left of the third group of a long one.
+void orderLayers(
+	std::map<int, QStringList>& byLayer,
+	const std::map<QString, int>& layers,
+	const std::map<std::pair<QString, QString>, size_t>& deps)
+{
+	std::map<QString, double> place;
+	auto renumber = [&place](const QStringList& row) {
+		for (qsizetype i = 0; i < row.size(); i++)
+		{
+			place[row[i]] = (i + 0.5) / row.size();
+		}
+	};
+	for (const auto& layer: byLayer)
+	{
+		renumber(layer.second);
+	}
+
+	// A group's neighbours, split by whether they sit above it or below it. Both directions are
+	// kept: a group with only outgoing edges would otherwise never move on the upward pass.
+	std::map<QString, std::vector<std::pair<QString, size_t>>> above, below;
+	for (const auto& dep: deps)
+	{
+		const QString& source = dep.first.first;
+		const QString& target = dep.first.second;
+		const int sourceLayer = layers.at(source);
+		const int targetLayer = layers.at(target);
+		if (sourceLayer < targetLayer)
+		{
+			above[target].push_back({source, dep.second});
+			below[source].push_back({target, dep.second});
+		}
+		else if (targetLayer < sourceLayer)
+		{
+			above[source].push_back({target, dep.second});
+			below[target].push_back({source, dep.second});
+		}
+		// same layer: neither one can pull the other sideways, the curve just stays flat
+	}
+
+	for (int pass = 0; pass < 6; pass++)
+	{
+		const auto& side = (pass % 2 == 0) ? above : below;
+		for (auto& layer: byLayer)
+		{
+			std::map<QString, double> bary;
+			for (const QString& name: layer.second)
+			{
+				auto it = side.find(name);
+				double sum = 0;
+				double weight = 0;
+				if (it != side.end())
+				{
+					for (const auto& neighbour: it->second)
+					{
+						sum += place[neighbour.first] * neighbour.second;
+						weight += neighbour.second;
+					}
+				}
+				// nothing on this side: stay put rather than drift to the left edge
+				bary[name] = weight > 0 ? sum / weight : place[name];
+			}
+			std::stable_sort(
+				layer.second.begin(),
+				layer.second.end(),
+				[&bary](const QString& a, const QString& b) { return bary[a] < bary[b]; });
+			renumber(layer.second);
+		}
+	}
 }
 
 // A node the user can drag. Everything else about it is a plain rect item; the only care needed
@@ -650,6 +739,7 @@ void QtCodeMap::rebuild()
 	{
 		byLayer[layers.at(name)].append(name);
 	}
+	orderLayers(byLayer, layers, deps);
 
 	qreal y = 0;
 	size_t documented = 0;
@@ -760,8 +850,16 @@ void QtCodeMap::rebuild()
 		maxCount = std::max(maxCount, dep.second);
 		strongestOut[dep.first.first] = std::max(strongestOut[dep.first.first], dep.second);
 	}
+	size_t hidden = 0;
 	for (const auto& dep: deps)
 	{
+		const qreal share = static_cast<qreal>(dep.second) / strongestOut[dep.first.first];
+		if (share < kCurveShare)
+		{
+			hidden++;
+			continue;
+		}
+
 		const QRectF source = rects[dep.first.first];
 		const QRectF target = rects[dep.first.second];
 		const QPointF from(source.center().x(), source.bottom());
@@ -772,9 +870,7 @@ void QtCodeMap::rebuild()
 		path.cubicTo(from + QPointF(0, bend), to - QPointF(0, bend), to);
 
 		QGraphicsPathItem* curve = m_scene->addPath(path);
-		// A group's main dependency is drawn solid, its trickle stays a whisper. Everything is
-		// still there, it just does not add up to a hairball.
-		const qreal share = static_cast<qreal>(dep.second) / strongestOut[dep.first.first];
+		// Within what is left, a group's main tie is still drawn stronger than its side ones.
 		QColor edgeColor = color(GraphViewStyle::getEdgeColor("call"));
 		edgeColor.setAlpha(static_cast<int>(25 + 165 * share));
 		curve->setPen(QPen(
@@ -787,10 +883,12 @@ void QtCodeMap::rebuild()
 	}
 
 	m_scene->setSceneRect(m_scene->itemsBoundingRect().adjusted(-40, -40, 40, 40));
-	m_stats->setText(QStringLiteral("%1 Dateien, %2 Gruppen, %3 beschrieben")
+	m_stats->setText(QStringLiteral("%1 Dateien, %2 Gruppen, %3 beschrieben — %4 Verbindungen, %5 schwache ausgeblendet")
 						 .arg(m_data.files.size())
 						 .arg(names.size())
-						 .arg(documented));
+						 .arg(documented)
+						 .arg(deps.size() - hidden)
+						 .arg(hidden));
 
 	// a rebuild throws away the items, so the selection has to be marked again
 	if (m_currentFileId)
