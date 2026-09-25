@@ -1,0 +1,25 @@
+#!/bin/sh
+# Pull the indexed repo from GitHub, then open Sourcetrail on the Asset Bridge
+# project. Hit Refresh in the GUI to re-index what the pull changed.
+#   --index [-f]   headless re-index instead of opening the GUI
+#
+# The three paths are the only things that differ between machines, so they come
+# from the environment. Set them in ~/.profile if your checkout lives elsewhere.
+
+: "${ASSETBRIDGE_REPO:=$HOME/Dokumente/Asset Bridge}"
+: "${ASSETBRIDGE_PROJECT:=$HOME/surcetai/asset-bridge-index/AssetBridge.srctrlprj}"
+: "${SOURCETRAIL_APP:=$HOME/.local/opt/Sourcetrail/app/Sourcetrail.sh}"
+
+if [ ! -x "$SOURCETRAIL_APP" ]; then
+    echo "sourcetrail: $SOURCETRAIL_APP not found — run scripts/assetbridge/install.sh" >&2
+    exit 1
+fi
+
+GIT_TERMINAL_PROMPT=0 git -C "$ASSETBRIDGE_REPO" pull --ff-only ||
+    echo "sourcetrail: git pull failed, using the checkout as it is" >&2
+
+if [ "$1" = "--index" ]; then
+    shift
+    exec "$SOURCETRAIL_APP" index --project-file "$ASSETBRIDGE_PROJECT" "$@"
+fi
+exec "$SOURCETRAIL_APP" "${1:-$ASSETBRIDGE_PROJECT}"

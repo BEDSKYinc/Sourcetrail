@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Sourcetrail
+GenericName=Source Explorer
+Comment=Interactive source explorer (Rust, Python, TypeScript)
+Exec=@EXEC@ %f
+Icon=sourcetrail
+Terminal=false
+Categories=Development;IDE;
+MimeType=application/x-sourcetrail-project;
+StartupWMClass=Sourcetrail
