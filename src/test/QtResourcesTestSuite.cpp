@@ -27,6 +27,8 @@ const char *resourceNames[] = {
 	QtResources::BOOKMARK_VIEW_BOOKMARK_LIST_ICON,
 	QtResources::BOOKMARK_VIEW_BOOKMARK_EDIT_BOOKMARK_ICON,
 
+	QtResources::CODE_MAP_CSS,
+
 	QtResources::CODE_VIEW_CSS,
 	QtResources::CODE_VIEW_ARROW_DOWN,
 	QtResources::CODE_VIEW_ARROW_LEFT,

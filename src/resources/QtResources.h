@@ -20,6 +20,8 @@ public:
 	static const char BOOKMARK_VIEW_BOOKMARK_LIST_ICON[];
 	static const char BOOKMARK_VIEW_BOOKMARK_EDIT_BOOKMARK_ICON[];
 
+	static const char CODE_MAP_CSS[];
+
 	static const char CODE_VIEW_CSS[];
 	static const char CODE_VIEW_ARROW_DOWN[];
 	static const char CODE_VIEW_ARROW_LEFT[];

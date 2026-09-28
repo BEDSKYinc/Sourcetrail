@@ -21,6 +21,8 @@ qt_add_resources(Sourcetrail_res_gui Sourcetrail_resources
 		bookmark_view/images/edit_bookmark_icon.png
 		bookmark_view/bookmark_view.css
 		
+		code_map/code_map.css
+		
 		code_view/code_view.css
 		code_view/images/arrow_down.png
 		code_view/images/arrow_left.png

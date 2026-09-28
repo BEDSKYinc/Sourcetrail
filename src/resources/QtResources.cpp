@@ -27,6 +27,8 @@ const char QtResources::BOOKMARK_VIEW_BOOKMARK_EDIT_ICON[]          = ":/bookmar
 const char QtResources::BOOKMARK_VIEW_BOOKMARK_LIST_ICON[]          = ":/bookmark_view/images/bookmark_list_icon.png";
 const char QtResources::BOOKMARK_VIEW_BOOKMARK_EDIT_BOOKMARK_ICON[] = ":/bookmark_view/images/edit_bookmark_icon.png";
 
+const char QtResources::CODE_MAP_CSS[] = ":/code_map/code_map.css";
+
 const char QtResources::CODE_VIEW_CSS[]                 = ":/code_view/code_view.css";
 const char QtResources::CODE_VIEW_ARROW_DOWN[]          = ":/code_view/images/arrow_down.png";
 const char QtResources::CODE_VIEW_ARROW_LEFT[]          = ":/code_view/images/arrow_left.png";
