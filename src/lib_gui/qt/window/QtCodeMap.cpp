@@ -8,7 +8,7 @@
 #include <QCoreApplication>
 #include <QComboBox>
 #include <QFile>
-#include <QGraphicsPathItem>
+#include <QGraphicsPixmapItem>
 #include <QGraphicsRectItem>
 #include <QGraphicsScene>
 #include <QGraphicsSceneMouseEvent>
@@ -30,18 +30,26 @@
 #include <QTextBrowser>
 #include <QTextEdit>
 #include <QTimer>
+#include <QToolBar>
 
 #include "Application.h"
 #include "GraphViewStyle.h"
 #include "logging.h"
 #include "MessageActivateFile.h"
+#include "QtDeviceScaledPixmap.h"
+#include "QtLineItemBezier.h"
+#include "QtResources.h"
+#include "QtRoundedRectItem.h"
 #include "StorageAccess.h"
+#include "utilityQt.h"
 
 namespace
 {
 const int kHeader = 24;
 const int kFileW = 190;
-const int kFileH = 22;
+// As tall as a file node in the graph view: the top and bottom margin of a data node plus a
+// line of text. Below that the name does not sit where GraphViewStyle puts it.
+const int kFileH = 31;
 const int kGap = 6;
 const int kPad = 10;
 const int kGroupGap = 40;
@@ -59,6 +67,16 @@ const qreal kCurveShare = 0.20;
 QColor color(const std::string& c)
 {
 	return QColor(QString::fromStdString(c));
+}
+
+// left, top, right, bottom - what QtLineItemBase reads out of a Vec4i
+Vec4i toVec(const QRectF& rect)
+{
+	return Vec4i(
+		static_cast<int>(rect.left()),
+		static_cast<int>(rect.top()),
+		static_cast<int>(rect.right()),
+		static_cast<int>(rect.bottom()));
 }
 
 QString groupOfPath(const QString& rel)
@@ -256,11 +274,15 @@ void orderLayers(
 
 // A node the user can drag. Everything else about it is a plain rect item; the only care needed
 // is telling a click apart from a drag, because both start with the same press.
-class MapItem: public QGraphicsRectItem
+class MapItem: public QtRoundedRectItem
 {
 public:
 	MapItem(QtCodeMap* map, const QString& group, Id fileId, const QString& layoutKey)
-		: m_map(map), m_group(group), m_fileId(fileId), m_layoutKey(layoutKey)
+		: QtRoundedRectItem(nullptr)
+		, m_map(map)
+		, m_group(group)
+		, m_fileId(fileId)
+		, m_layoutKey(layoutKey)
 	{
 		setFlag(QGraphicsItem::ItemIsMovable, true);
 		setCursor(Qt::OpenHandCursor);
@@ -271,7 +293,7 @@ protected:
 	{
 		m_pressedAt = event->scenePos();
 		m_moved = false;
-		QGraphicsRectItem::mousePressEvent(event);
+		QtRoundedRectItem::mousePressEvent(event);
 	}
 
 	void mouseMoveEvent(QGraphicsSceneMouseEvent* event) override
@@ -280,12 +302,12 @@ protected:
 		{
 			m_moved = true;
 		}
-		QGraphicsRectItem::mouseMoveEvent(event);
+		QtRoundedRectItem::mouseMoveEvent(event);
 	}
 
 	void mouseReleaseEvent(QGraphicsSceneMouseEvent* event) override
 	{
-		QGraphicsRectItem::mouseReleaseEvent(event);
+		QtRoundedRectItem::mouseReleaseEvent(event);
 
 		if (m_moved)
 		{
@@ -316,6 +338,10 @@ class MapView: public QGraphicsView
 public:
 	using QGraphicsView::QGraphicsView;
 
+	// Set by the owner when it fits the whole map into the dock, cleared as soon as the user
+	// zooms or pans: a resize may only refit a view the user has not taken over.
+	bool* m_fitted = nullptr;
+
 	// Plain wheel zooms, like every other map. The clamp keeps a fast scroll from leaving the
 	// map as a single pixel or as one node filling the window.
 	void zoom(double factor)
@@ -326,6 +352,10 @@ public:
 		{
 			const double applied = next / now;
 			scale(applied, applied);
+			if (m_fitted)
+			{
+				*m_fitted = false;
+			}
 		}
 	}
 
@@ -364,6 +394,10 @@ protected:
 		{
 			const QPoint delta = event->pos() - m_panFrom;
 			m_panFrom = event->pos();
+			if (m_fitted)
+			{
+				*m_fitted = false;
+			}
 			horizontalScrollBar()->setValue(horizontalScrollBar()->value() - delta.x());
 			verticalScrollBar()->setValue(verticalScrollBar()->value() - delta.y());
 			event->accept();
@@ -392,6 +426,9 @@ private:
 
 QtCodeMap::QtCodeMap(QWidget* parent): QWidget(parent)
 {
+	setObjectName(QStringLiteral("code_map"));
+	refreshStyle();
+
 	QHBoxLayout* layout = new QHBoxLayout(this);
 	layout->setContentsMargins(0, 0, 0, 0);
 
@@ -403,45 +440,54 @@ QtCodeMap::QtCodeMap(QWidget* parent): QWidget(parent)
 	QVBoxLayout* leftLayout = new QVBoxLayout(left);
 	leftLayout->setContentsMargins(4, 4, 4, 4);
 
-	QHBoxLayout* toolbar = new QHBoxLayout();
-	toolbar->addWidget(new QLabel(QStringLiteral("Gruppierung:"), left));
-	m_grouping = new QComboBox(left);
+	// A QToolBar and not a QHBoxLayout: eight buttons in a row demand more width than the dock
+	// ever gets, and a layout answers that by refusing to shrink - which is what pushed the note
+	// pane off the window. A toolbar folds what does not fit into its own overflow menu instead.
+	QToolBar* toolbar = new QToolBar(left);
+	toolbar->setFloatable(false);
+	toolbar->setMovable(false);
+	toolbar->addWidget(new QLabel(QStringLiteral("Gruppierung:"), toolbar));
+	m_grouping = new QComboBox(toolbar);
 	m_grouping->addItem(QStringLiteral("Verzeichnis"));
 	m_grouping->addItem(QStringLiteral("Feature"));
 	toolbar->addWidget(m_grouping);
 
-	QPushButton* collapse = new QPushButton(QStringLiteral("Alle einklappen"), left);
+	QPushButton* collapse = new QPushButton(QStringLiteral("Alle einklappen"), toolbar);
 	toolbar->addWidget(collapse);
-	QPushButton* reload = new QPushButton(QStringLiteral("Neu laden"), left);
+	QPushButton* reload = new QPushButton(QStringLiteral("Neu laden"), toolbar);
 	toolbar->addWidget(reload);
 
-	QPushButton* zoomOut = new QPushButton(QStringLiteral("−"), left);
+	QPushButton* zoomOut = new QPushButton(QStringLiteral("−"), toolbar);
 	zoomOut->setToolTip(QStringLiteral("Herauszoomen (Mausrad)"));
 	zoomOut->setFixedWidth(28);
 	toolbar->addWidget(zoomOut);
-	QPushButton* zoomIn = new QPushButton(QStringLiteral("+"), left);
+	QPushButton* zoomIn = new QPushButton(QStringLiteral("+"), toolbar);
 	zoomIn->setToolTip(QStringLiteral("Hineinzoomen (Mausrad)"));
 	zoomIn->setFixedWidth(28);
 	toolbar->addWidget(zoomIn);
-	QPushButton* fit = new QPushButton(QStringLiteral("Alles zeigen"), left);
+	QPushButton* fit = new QPushButton(QStringLiteral("Alles zeigen"), toolbar);
 	fit->setToolTip(QStringLiteral("Ganze Karte ins Fenster (Ziehen: mittlere Maustaste)"));
 	toolbar->addWidget(fit);
 
-	QPushButton* resetLayout = new QPushButton(QStringLiteral("Anordnung zurücksetzen"), left);
+	QPushButton* resetLayout = new QPushButton(QStringLiteral("Anordnung zurücksetzen"), toolbar);
 	resetLayout->setToolTip(QStringLiteral("Verschobene Knoten wieder ins Raster stellen"));
 	toolbar->addWidget(resetLayout);
-
-	m_stats = new QLabel(left);
-	toolbar->addWidget(m_stats);
-	toolbar->addStretch();
-	leftLayout->addLayout(toolbar);
+	leftLayout->addWidget(toolbar);
 
 	m_scene = new QGraphicsScene(this);
 	m_view = new MapView(m_scene, left);
 	m_view->setRenderHint(QPainter::Antialiasing);
 	m_view->setDragMode(QGraphicsView::NoDrag);
 	m_view->setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
+	static_cast<MapView*>(m_view)->m_fitted = &m_fitted;
 	leftLayout->addWidget(m_view);
+
+	// Under the map, not in the toolbar: the counts are a whole sentence and would otherwise set
+	// the width of the entire dock. Wrapping is what makes a QLabel shrinkable - without it the
+	// minimum width is the whole line, and the dock cannot go below it.
+	m_stats = new QLabel(left);
+	m_stats->setWordWrap(true);
+	leftLayout->addWidget(m_stats);
 
 	// note and question side
 	QWidget* right = new QWidget(splitter);
@@ -463,7 +509,11 @@ QtCodeMap::QtCodeMap(QWidget* parent): QWidget(parent)
 	rightLayout->addWidget(m_note, 2);
 
 	QHBoxLayout* chatHead = new QHBoxLayout();
-	chatHead->addWidget(new QLabel(QStringLiteral("Chat zur Auswahl"), right));
+	// wrapping, or the caption and the button together set a floor for the whole note pane and
+	// the button is the one that gets cut off
+	QLabel* chatLabel = new QLabel(QStringLiteral("Chat zur Auswahl"), right);
+	chatLabel->setWordWrap(true);
+	chatHead->addWidget(chatLabel);
 	chatHead->addStretch();
 	QPushButton* newChat = new QPushButton(QStringLiteral("Neuer Chat"), right);
 	newChat->setToolTip(QStringLiteral("Gespräch vergessen und von vorne anfangen"));
@@ -484,6 +534,8 @@ QtCodeMap::QtCodeMap(QWidget* parent): QWidget(parent)
 
 	splitter->setStretchFactor(0, 3);
 	splitter->setStretchFactor(1, 1);
+	splitter->setSizes({700, 320});
+	right->setMinimumWidth(180);
 
 	m_noteTimer = new QTimer(this);
 	m_noteTimer->setSingleShot(true);
@@ -530,12 +582,26 @@ QtCodeMap::~QtCodeMap()
 	saveNote();
 }
 
+void QtCodeMap::refreshStyle()
+{
+	setStyleSheet(QtResources::loadStyleSheet(QtResources::CODE_MAP_CSS));
+}
+
 void QtCodeMap::showEvent(QShowEvent* event)
 {
 	QWidget::showEvent(event);
 	if (m_data.files.empty())
 	{
 		refresh();
+	}
+}
+
+void QtCodeMap::resizeEvent(QResizeEvent* event)
+{
+	QWidget::resizeEvent(event);
+	if (m_fitted)
+	{
+		zoomFit();
 	}
 }
 
@@ -689,6 +755,7 @@ void QtCodeMap::zoomBy(double factor)
 void QtCodeMap::zoomFit()
 {
 	m_view->fitInView(m_scene->sceneRect(), Qt::KeepAspectRatio);
+	m_fitted = true;
 }
 
 void QtCodeMap::writeNotes()
@@ -890,9 +957,28 @@ void QtCodeMap::rebuild()
 		layers = layerGroups(names, deps);
 	}
 
-	const GraphViewStyle::NodeColor groupColor = GraphViewStyle::getNodeColor("namespace", false);
-	const GraphViewStyle::NodeColor fileColor = GraphViewStyle::getNodeColor("file", false);
+	// The map draws the two things the graph view already draws: a frame around a group of nodes,
+	// and a file node. Both styles are asked of GraphViewStyle, so corners, border widths, fonts
+	// and the icon are whatever the colour scheme says they are - nothing invented here.
+	const GraphViewStyle::NodeStyle groupStyle = GraphViewStyle::getStyleOfGroupNode(
+		GroupType::NAMESPACE, false);
+	const GraphViewStyle::NodeStyle fileStyle = GraphViewStyle::getStyleForNodeType(
+		NodeType(NODE_FILE), true, false, false, false, false, false);
+	const GraphViewStyle::NodeColor fileColor = fileStyle.color;
+	// a described file is drawn like the file the graph view is looking at
 	const GraphViewStyle::NodeColor noteColor = GraphViewStyle::getNodeColor("file", true);
+
+	QFont groupFont(QString::fromStdString(groupStyle.fontName));
+	groupFont.setPixelSize(static_cast<int>(groupStyle.fontSize));
+	groupFont.setBold(groupStyle.fontBold);
+	QFont fileFont(QString::fromStdString(fileStyle.fontName));
+	fileFont.setPixelSize(static_cast<int>(fileStyle.fontSize));
+
+	// the graph view's file icon, tinted once for a plain and once for a described file
+	QtDeviceScaledPixmap fileIcon(QString::fromStdString(fileStyle.iconPath.str()));
+	fileIcon.scaleToHeight(static_cast<int>(fileStyle.iconSize));
+	const QPixmap filePixmap = utility::colorizePixmap(fileIcon.pixmap(), color(fileColor.icon));
+	const QPixmap notePixmap = utility::colorizePixmap(fileIcon.pixmap(), color(noteColor.icon));
 
 	// size and place every group, one row per layer
 	std::map<QString, QRectF> rects;
@@ -956,12 +1042,10 @@ void QtCodeMap::rebuild()
 		if (label != stageLabels.end() && !label->second.isEmpty())
 		{
 			QGraphicsSimpleTextItem* text = m_scene->addSimpleText(label->second);
-			QFont labelFont = text->font();
-			labelFont.setBold(true);
-			text->setFont(labelFont);
-			// The group text colour is meant to sit on the group's own fill; out here on the dark
-			// background it is all but black. The fill colour is the readable half of that pair.
-			text->setBrush(color(groupColor.fill));
+			text->setFont(groupFont);
+			// the labels stand on the map background, not on a group, so they take the colour the
+			// scheme reserves for exactly that: the group frame text
+			text->setBrush(color(groupStyle.color.text));
 			text->setPos(labelX - text->boundingRect().width() - 2 * kGroupGap, y + 4);
 			text->setZValue(1);
 		}
@@ -1008,18 +1092,17 @@ void QtCodeMap::rebuild()
 			{
 				item->setPos(groupPos[0].toDouble(), groupPos[1].toDouble());
 			}
-			item->setBrush(color(groupColor.fill));
-			item->setPen(QPen(color(groupColor.border), 1));
+			item->setRadius(groupStyle.cornerRadius);
+			item->setBrush(color(groupStyle.color.fill));
+			item->setPen(QPen(color(groupStyle.color.border), groupStyle.borderWidth));
 			item->setZValue(1);
 			m_scene->addItem(item);
 
 			QGraphicsSimpleTextItem* title = new QGraphicsSimpleTextItem(
 				name + QStringLiteral("  (%1)").arg(files.size()), item);
-			title->setBrush(color(groupColor.text));
-			QFont titleFont = title->font();
-			titleFont.setBold(true);
-			title->setFont(titleFont);
-			title->setPos(kPad, 5);
+			title->setBrush(color(groupStyle.color.text));
+			title->setFont(groupFont);
+			title->setPos(groupStyle.textOffset.x, groupStyle.textOffset.y);
 
 			if (expanded)
 			{
@@ -1040,22 +1123,32 @@ void QtCodeMap::rebuild()
 					{
 						node->setPos(nodePos[0].toDouble(), nodePos[1].toDouble());
 					}
+					node->setRadius(fileStyle.cornerRadius);
 					node->setBrush(color(hasNote ? noteColor.fill : fileColor.fill));
-					node->setPen(QPen(color(hasNote ? noteColor.border : fileColor.border), 1));
+					node->setPen(QPen(
+						color(hasNote ? noteColor.border : fileColor.border), fileStyle.borderWidth));
 					node->setParentItem(item);
+					// a child below its parent's z paints behind it, and QtRoundedRectItem starts there
+					node->setZValue(1);
 					node->setToolTip(rel + QStringLiteral("\n%1 Symbole").arg(file.symbolCount));
 					m_nodeItems[file.nodeId] = node;
 
-					QString label = rel.section(QLatin1Char('/'), -1);
+					QGraphicsPixmapItem* icon = new QGraphicsPixmapItem(
+						hasNote ? notePixmap : filePixmap, node);
+					icon->setTransformationMode(Qt::SmoothTransformation);
+					icon->setPos(fileStyle.iconOffset.x, fileStyle.iconOffset.y);
+
+					// where a graph view node puts its name: past the icon, by the style's offset
+					const qreal textX = fileStyle.iconOffset.x + static_cast<int>(fileStyle.iconSize) +
+						fileStyle.textOffset.x;
+					const QString label = QFontMetricsF(fileFont).elidedText(
+						rel.section(QLatin1Char('/'), -1),
+						Qt::ElideRight,
+						kFileW - textX - fileStyle.textOffset.x);
 					QGraphicsSimpleTextItem* text = new QGraphicsSimpleTextItem(label, node);
+					text->setFont(fileFont);
 					text->setBrush(color(hasNote ? noteColor.text : fileColor.text));
-					if (text->boundingRect().width() > kFileW - 10)
-					{
-						text->setText(
-							text->text().left(std::max(4, static_cast<int>((kFileW - 14) / 6))) +
-							QStringLiteral("…"));
-					}
-					text->setPos(6, 3);
+					text->setPos(textX, fileStyle.textOffset.y);
 				}
 			}
 
@@ -1067,12 +1160,12 @@ void QtCodeMap::rebuild()
 		y += rowHeight + kLayerGap;
 	}
 
-	// dependency curves behind the groups
-	size_t maxCount = 1;
+	// dependency curves behind the groups, drawn by the graph view's own edge item
+	const GraphViewStyle::EdgeStyle edgeStyle = GraphViewStyle::getStyleForEdgeType(
+		Edge::EDGE_CALL, false, false, false, false);
 	std::map<QString, size_t> strongestOut;
 	for (const auto& dep: deps)
 	{
-		maxCount = std::max(maxCount, dep.second);
 		strongestOut[dep.first.first] = std::max(strongestOut[dep.first.first], dep.second);
 	}
 	size_t hidden = 0;
@@ -1088,28 +1181,23 @@ void QtCodeMap::rebuild()
 		const QRectF source = rects[dep.first.first];
 		const QRectF target = rects[dep.first.second];
 
-		// Anchored by where the two groups sit, not by who calls whom. In a pipeline most calls
-		// point back up the flow — the exporter calls the database, not the other way round — and
-		// leaving those from the bottom edge sent every single one on a loop around the whole map.
-		// The map draws no arrow heads anyway; the stage rows carry the direction.
-		const bool downward = source.center().y() <= target.center().y();
-		const QRectF& upper = downward ? source : target;
-		const QRectF& lower = downward ? target : source;
-		const QPointF from(upper.center().x(), upper.bottom());
-		const QPointF to(lower.center().x(), lower.top());
-
-		QPainterPath path(from);
-		const qreal bend = std::max<qreal>(40, std::abs(to.y() - from.y()) / 2);
-		path.cubicTo(from + QPointF(0, bend), to - QPointF(0, bend), to);
-
-		QGraphicsPathItem* curve = m_scene->addPath(path);
-		// Within what is left, a group's main tie is still drawn stronger than its side ones.
-		QColor edgeColor = color(GraphViewStyle::getEdgeColor("call"));
-		edgeColor.setAlpha(static_cast<int>(25 + 165 * share));
-		curve->setPen(QPen(
-			edgeColor, 1.0 + 3.0 * std::log(1.0 + dep.second) / std::log(1.0 + maxCount),
-			Qt::SolidLine, Qt::RoundCap));
+		// The same bezier the graph view draws, and it picks its two ends itself: the nearest pair
+		// of sides. That is what the hand rolled curve could not do - anchoring every one of them
+		// at the bottom edge sent the calls that point back up the pipeline on a loop around the
+		// whole map, so the map drew no arrow heads at all. This one brings them along.
+		QtLineItemBezier* curve = new QtLineItemBezier(nullptr);
+		curve->updateLine(
+			toVec(source), toVec(target), toVec(source), toVec(target), edgeStyle, dep.second, true);
+		curve->setRoute(QtLineItemBase::ROUTE_VERTICAL);
 		curve->setZValue(0);
+		m_scene->addItem(curve);
+
+		// Within what is left, a group's main tie is still drawn stronger than its side ones.
+		QPen pen = curve->pen();
+		QColor edgeColor = pen.color();
+		edgeColor.setAlpha(static_cast<int>(25 + 165 * share));
+		pen.setColor(edgeColor);
+		curve->setPen(pen);
 		curve->setToolTip(QStringLiteral("%1 → %2: %3 Verbindungen")
 							  .arg(dep.first.first, dep.first.second)
 							  .arg(dep.second));
@@ -1310,7 +1398,8 @@ void QtCodeMap::ask()
 
 	const QString question = m_question->text();
 	m_question->clear();
-	appendChat(QStringLiteral("Du"), question, QStringLiteral("#888"));
+	appendChat(QStringLiteral("Du"), question,
+			   QString::fromStdString(GraphViewStyle::getEdgeColor("default")));
 
 	// The selection is only spelled out when it changed. Repeating it every turn would push the
 	// conversation back to the same file after each follow up question.
@@ -1378,7 +1467,8 @@ void QtCodeMap::askFinished()
 		m_ask->exitCode() != 0 || answer.isEmpty();
 	if (!failed)
 	{
-		appendChat(QStringLiteral("Claude"), answer, QStringLiteral("#7ba7d7"));
+		appendChat(QStringLiteral("Claude"), answer,
+				   QString::fromStdString(GraphViewStyle::getEdgeColor("use")));
 	}
 	else
 	{
@@ -1388,7 +1478,7 @@ void QtCodeMap::askFinished()
 				QStringLiteral("\n\n(claude endete mit %1 – einmal `claude` im Terminal starten "
 							   "und einloggen.)")
 					.arg(m_ask->exitCode()),
-			QStringLiteral("#d77b7b"));
+			QString::fromStdString(GraphViewStyle::getEdgeColor("type_argument")));
 	}
 
 	m_ask->deleteLater();
@@ -1449,4 +1539,17 @@ void QtCodeMap::handleMessage(MessageActivateTokens* message)
 void QtCodeMap::handleMessage(MessageIndexingFinished*  /*message*/)
 {
 	m_onQtThread([this]() { refresh(); });
+}
+
+void QtCodeMap::handleMessage(MessageRefreshUI* message)
+{
+	if (!message->loadStyle)
+	{
+		return;
+	}
+	// a new colour scheme repaints the widgets from the sheet and the nodes from GraphViewStyle
+	m_onQtThread([this]() {
+		refreshStyle();
+		rebuild();
+	});
 }

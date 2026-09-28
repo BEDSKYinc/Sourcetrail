@@ -16,6 +16,7 @@
 #include "MessageActivateTokens.h"
 #include "MessageIndexingFinished.h"
 #include "MessageListener.h"
+#include "MessageRefreshUI.h"
 #include "QtThreadedFunctor.h"
 
 class QComboBox;
@@ -36,6 +37,7 @@ class QtCodeMap
 	: public QWidget
 	, public MessageListener<MessageActivateTokens>
 	, public MessageListener<MessageIndexingFinished>
+	, public MessageListener<MessageRefreshUI>
 {
 	Q_OBJECT
 
@@ -58,10 +60,15 @@ private Q_SLOTS:
 
 protected:
 	void showEvent(QShowEvent* event) override;
+	void resizeEvent(QResizeEvent* event) override;
 
 private:
 	void handleMessage(MessageActivateTokens* message) override;
 	void handleMessage(MessageIndexingFinished* message) override;
+	void handleMessage(MessageRefreshUI* message) override;
+
+	// the dock takes its colours from the scheme, not from the desktop palette
+	void refreshStyle();
 
 	void select(const QString& key, const QString& title, const FilePath& path, Id fileNodeId);
 	void showNote();
@@ -113,6 +120,9 @@ private:
 
 	std::map<Id, QGraphicsRectItem*> m_nodeItems;
 	QGraphicsRectItem* m_highlighted = nullptr;
+	// a map that is showing everything keeps doing so while the dock is resized; once the user
+	// zooms or pans by hand their view is theirs and a resize must not throw it away
+	bool m_fitted = true;
 	QPen m_highlightedPen;
 
 	QComboBox* m_grouping;

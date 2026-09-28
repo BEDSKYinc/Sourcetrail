@@ -1,0 +1,63 @@
+/* The Landkarte is a plain QWidget, so without this it would paint in the desktop palette while
+   the rest of Sourcetrail paints in the colour scheme - dark map, bright app. Every colour here
+   comes from the scheme, so the dock follows a scheme switch like every other view. */
+
+#code_map, #code_map QWidget {
+	background: <color:window/background>;
+	color: <color:window/button/text>;
+	font-size: <setting:font_size>px;
+}
+
+#code_map QToolBar {
+	border: none;
+	padding: 0px;
+	spacing: 4px;
+}
+
+#code_map QLabel {
+	background: transparent;
+	color: <color:window/button/text>;
+}
+
+#code_map QGraphicsView {
+	background: <color:graph/background>;
+	border: 1px solid <color:window/dock/line>;
+}
+
+#code_map QPushButton {
+	background: <color:window/button/background>;
+	border: 1px solid <color:window/button/border>;
+	border-radius: 5px;
+	color: <color:window/button/text>;
+	padding: 3px 8px;
+}
+
+#code_map QPushButton:hover {
+	border: 1px solid <color:window/button/border_hover>;
+}
+
+#code_map QPushButton:pressed {
+	background: <color:search/popup/highlight>;
+}
+
+#code_map QComboBox, #code_map QLineEdit, #code_map QTextEdit, #code_map QTextBrowser {
+	background: <color:search/field/background>;
+	border: 1px solid <color:search/field/border>;
+	border-radius: 5px;
+	color: <color:search/field/text>;
+	padding: 2px 4px;
+	selection-background-color: <color:search/popup/highlight>;
+	selection-color: <color:search/popup/text>;
+}
+
+#code_map QComboBox QAbstractItemView {
+	background: <color:search/popup/background>;
+	border: 1px solid <color:search/popup/line>;
+	color: <color:search/popup/text>;
+	selection-background-color: <color:search/popup/highlight>;
+	selection-color: <color:search/popup/text>;
+}
+
+#code_map QSplitter::handle {
+	background: <color:window/dock/line>;
+}
