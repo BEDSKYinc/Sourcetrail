@@ -258,6 +258,37 @@ class Index:
                 )
             return "\n".join(out)
 
+    def _graph(self, *argv):
+        """tools/graph_query.py im Repo, nicht noch einmal dieselbe Logik hier.
+
+        Es kennt die vier Naehte, an denen dieser Index blind ist (invoke(),
+        run_script(), Rusts unqualifizierte Pfade, `pub use`-Re-Exports) und
+        synthetisiert sie beim Laden. Ein Fund ist dort ein Exit-Code, kein Fehler: `register` und
+        `ipc missing` enden mit 1, wenn sie etwas gefunden haben.
+        """
+        tool = os.path.join(os.path.dirname(self.crate_root), "tools", "graph_query.py")
+        if not os.path.exists(tool):
+            return f"{tool} not found - this tool ships with the repo, not with the indexer."
+        run = subprocess.run([sys.executable, tool, "--db", self.db_path, *argv],
+                             capture_output=True, text=True, timeout=300)
+        return (run.stdout + run.stderr).strip() or "(no output)"
+
+    def callers(self, symbol):
+        return self._graph("callers", symbol)
+
+    def ipc(self, action, command=None):
+        return self._graph("ipc", action, *([command] if command else []))
+
+    def funnel(self, symbol, pattern=None, only=None):
+        return self._graph("funnel", symbol, *([pattern] if pattern else []),
+                           *(["--only", only] if only else []))
+
+    def unused(self, like=None):
+        return self._graph("unused", *(["--like", like] if like else []))
+
+    def register(self):
+        return self._graph("register")
+
     def reindex(self):
         # Rebuild from scratch: resuming would keep locations for code that is gone.
         if os.path.exists(self.db_path):
@@ -294,6 +325,19 @@ class Index:
                 + f"\n  {f} files, {n} symbols, {e} references, "
                 f"{err} errors\nReopen or refresh the project in Sourcetrail to see it.")
 
+
+BLIND_SPOTS = (
+    "The index cannot see four things and this tool compensates for all of them: "
+    "invoke('cmd') from TypeScript into Rust, pyenv::run_script('x.py') from Rust into "
+    "Python, Rust calls written through an unqualified `use` path, and calls that go "
+    "through a `pub use` re-export, which skips middle module levels. Still invisible "
+    "afterwards: JSX (<Foo/> is not a use for the TS indexer) and any name that travels "
+    "through a string into SQLite or a .mtlx file."
+)
+
+# Die Profilnamen stehen in tools/graph_query.py; hier nur zum Anzeigen.
+PROFILE_NAMES = ("remap_paths", "record_state", "forget_asset_rows",
+                 "refresh_tags_mirror", "patch_settings")
 
 TOOLS = [
     {
@@ -336,6 +380,87 @@ TOOLS = [
         "name": "reindex",
         "description": "Re-run the Rust, Python and TypeScript indexers and rebuild the index from scratch. "
                        "Call after source changes so lookups reflect the current code.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "callers",
+        "description": "Who uses this symbol directly, ACROSS language boundaries. "
+                       + BLIND_SPOTS +
+                       " Prefer this over `symbol` when the answer matters: `symbol` reports the "
+                       "raw index and will show a #[tauri::command] with no callers at all.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"symbol": {"type": "string",
+                                      "description": "full path or a unique short name"}},
+            "required": ["symbol"],
+        },
+    },
+    {
+        "name": "ipc",
+        "description": "The Tauri seam between the React frontend and the Rust backend, which no "
+                       "indexer sees: the command list lives in a generate_handler! macro and the "
+                       "other side is a string argument to invoke(). "
+                       "action='unused' lists commands registered but never invoked (dead backend "
+                       "surface); action='missing' lists commands invoked but not registered (a "
+                       "runtime error in the window every time); action='callers' needs `command` "
+                       "and reports the TS file:line that triggers it. Wrappers that pass the "
+                       "command name through a variable are followed.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["unused", "missing", "callers"]},
+                "command": {"type": "string", "description": "required for action='callers'"},
+            },
+            "required": ["action"],
+        },
+    },
+    {
+        "name": "funnel",
+        "description": "Find code that performs a guarded operation WITHOUT going through the "
+                       "function meant to guard it - the shape most invariant breaks in this repo "
+                       "have. Takes every transitive caller of `symbol` from the graph, greps the "
+                       "indexed source for `pattern`, and reports the difference. Omit `pattern` "
+                       "to use a ready-made profile: " + ", ".join(sorted(PROFILE_NAMES)) +
+                       ". Results are candidates: a funnel can also be reached through an event "
+                       "or a string, and no graph shows that.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string",
+                           "description": "the guarding function, or a profile name"},
+                "pattern": {"type": "string",
+                            "description": "regex for the guarded operation, "
+                                           "e.g. 'UPDATE assets SET path'"},
+                "only": {"type": "string",
+                         "description": "regex limiting which file paths are searched"},
+            },
+            "required": ["symbol"],
+        },
+    },
+    {
+        "name": "unused",
+        "description": "Symbols with no incoming edge. CANDIDATES, NEVER A FINDING. "
+                       + BLIND_SPOTS +
+                       " A React component used only as <Foo/>, a Rust command reached only "
+                       "through invoke(), and a helper named only in a string all look dead here. "
+                       "Tests, React components, *.check.ts users and #[tauri::command] functions "
+                       "are hidden by default. Grep before deleting anything.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"like": {"type": "string", "description": "substring filter"}},
+        },
+    },
+    {
+        "name": "register",
+        "description": "Check the shared-rule table in CLAUDE.md ('Geteilte Regeln - das "
+                       "Register') against the index: for every rule, is the owner or mirror "
+                       "symbol still in the FILE the table points at? The question is location, "
+                       "not modelling - a name that merely appears as a word in that file counts, "
+                       "because the index does not know every `const` or store method as a symbol. "
+                       "A renamed or moved symbol means the table lies about where a rule lives. "
+                       "Reports only, never repairs. Warns when "
+                       "indexed files are newer than the index itself, because then some hits are "
+                       "merely stale rather than wrong.",
         "inputSchema": {"type": "object", "properties": {}},
     },
 ]
@@ -412,7 +537,12 @@ def self_test(index):
     assert [r["id"] for r in got] == [1, 2, 3, 4], "notifications must not get a response"
     assert got[0]["result"]["protocolVersion"] == PROTOCOL
     assert {t["name"] for t in got[1]["result"]["tools"]} == {
-        "search_symbols", "symbol", "file_symbols", "reindex"}
+        "search_symbols", "symbol", "file_symbols", "reindex",
+        "callers", "ipc", "funnel", "unused", "register"}
+    # Jedes Werkzeug braucht auch eine Methode - `getattr` faellt sonst erst
+    # beim Aufruf auf die Nase, und zwar im Fenster des Nutzers.
+    for tool in TOOLS:
+        assert callable(getattr(index, tool["name"], None)), tool["name"]
     assert "no symbol" in got[2]["result"]["content"][0]["text"]
     assert got[3]["error"]["code"] == -32601
     print("self-test ok")
